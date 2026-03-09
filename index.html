@@ -655,7 +655,7 @@
 
             // Gemini Routing
             if (apiConfig.provider === 'gemini') {
-                url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiConfig.key}`;
+                url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiConfig.key}`;
                 headers = { 'Content-Type': 'application/json' };
                 payload = { contents: [{ parts: [{ text: promptText }] }] };
                 if (expectJson) payload.generationConfig = { responseMimeType: "application/json" };
@@ -673,12 +673,12 @@
 
                 if (apiConfig.provider === 'groq') {
                     url = 'https://api.groq.com/openai/v1/chat/completions';
-                    payload.model = 'llama3-8b-8192'; 
+                    payload.model = 'llama-3.1-8b-instant'; 
                     if (expectJson) payload.response_format = { type: "json_object" };
                 } else if (apiConfig.provider === 'openrouter') {
                     url = 'https://openrouter.ai/api/v1/chat/completions';
                     // Fallback to a common free model
-                    payload.model = 'meta-llama/llama-3-8b-instruct:free';
+                    payload.model = 'meta-llama/llama-3.1-8b-instruct:free';
                     headers['HTTP-Referer'] = window.location.href;
                     headers['X-Title'] = 'Nexus RPG';
                     // OpenRouter free models might struggle with strict response_format flag, relying on prompt
