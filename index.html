@@ -24,7 +24,7 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // --- SISTEMA DE BANCO DE DADOS (IndexedDB para suportar imagens e áudio grandes) ---
+        // --- SISTEMA DE BANCO DE DADOS ---
         const DB_NAME = 'NexusRPGDB';
         const STORE_NAME = 'saveGames';
         
@@ -58,39 +58,38 @@
         };
 
         // --- INTEGRAÇÃO COM GEMINI API ---
-        
         const fetchWithBackoff = async (requestFn) => {
             const delays = [1000, 2000, 4000, 8000];
             for (let i = 0; i <= delays.length; i++) {
                 try {
                     return await requestFn();
                 } catch (error) {
-                    // Não retenta para erros críticos de rota ou autenticação
-                    if (error.message.includes('404') || error.message.includes('401')) throw error;
+                    if (error.message.includes('404') || error.message.includes('401') || error.message.includes('400')) throw error;
                     if (i === delays.length) throw error;
                     await new Promise(r => setTimeout(r, delays[i]));
                 }
             }
         };
 
-        // Modelos ativos em memória
-        let activeTextModel = 'gemini-1.5-flash';
-        let activeImageModel = 'imagen-3.0-generate-001';
-
-        const callGemini = async (apiKey, prompt, systemInstruction, isJson = true) => {
+        const callGemini = async (apiKey, modelName, prompt, systemInstruction, isJson = true) => {
             const payload = {
                 contents: [{ parts: [{ text: prompt }] }]
             };
             
+            // Modelos Thinking mais recentes às vezes preferem as instruções direto no prompt de usuário
             if (systemInstruction) {
-                payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+                if (modelName.includes('thinking')) {
+                    payload.contents[0].parts.unshift({ text: `[INSTRUÇÕES DO SISTEMA]: ${systemInstruction}\n\n[FIM DAS INSTRUÇÕES]\n` });
+                } else {
+                    payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+                }
             }
             
-            if (isJson) {
+            if (isJson && !modelName.includes('thinking')) {
                 payload.generationConfig = { responseMimeType: "application/json" };
             }
 
-            const makeRequest = async (modelName) => {
+            const makeRequest = async () => {
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
                 const response = await fetch(url, {
                     method: 'POST',
@@ -102,116 +101,22 @@
             };
 
             try {
-                const data = await fetchWithBackoff(() => makeRequest(activeTextModel));
-                const text = data.candidates[0].content.parts[0].text;
+                const data = await fetchWithBackoff(makeRequest);
+                let text = data.candidates[0].content.parts[0].text;
+                
+                // Se for um modelo thinking, limpa formatação markdown de bloco de código caso ele ignore o responseMimeType
+                if (isJson && modelName.includes('thinking')) {
+                    text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+                }
+                
                 return isJson ? JSON.parse(text) : text;
             } catch (error) {
-                // Fallback inteligente: se o ambiente Canvas bloquear o modelo de produção, troca dinamicamente.
-                if (error.message.includes('404') && activeTextModel === 'gemini-1.5-flash') {
-                    activeTextModel = 'gemini-2.5-flash-preview-09-2025';
-                    console.log("Fallback Ativado: Ambiente bloqueou 1.5, alterando para modelo preview...");
-                    const fallbackData = await makeRequest(activeTextModel);
-                    const text = fallbackData.candidates[0].content.parts[0].text;
-                    return isJson ? JSON.parse(text) : text;
-                }
                 console.error("Falha na chamada de texto:", error);
                 throw error;
             }
         };
 
-        const callGeminiImage = async (apiKey, prompt) => {
-            const payload = { instances: { prompt: prompt }, parameters: { sampleCount: 1 } };
-            
-            const makeRequest = async (modelName) => {
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:predict?key=${apiKey}`;
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                if (!response.ok) throw new Error(`API Error: ${response.status}`);
-                return await response.json();
-            };
-
-            try {
-                const data = await fetchWithBackoff(() => makeRequest(activeImageModel));
-                return `data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`;
-            } catch (error) {
-                if (error.message.includes('404') && activeImageModel === 'imagen-3.0-generate-001') {
-                    activeImageModel = 'imagen-4.0-generate-001';
-                    try {
-                        const fallbackData = await makeRequest(activeImageModel);
-                        return `data:image/png;base64,${fallbackData.predictions[0].bytesBase64Encoded}`;
-                    } catch (fallbackError) {
-                        console.error("Erro no fallback de imagem:", fallbackError);
-                        return null;
-                    }
-                }
-                console.error("Erro ao gerar imagem:", error);
-                return null;
-            }
-        };
-
-        const callGeminiTTS = async (apiKey, text) => {
-            // O modelo TTS continua sendo preview interno.
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
-            const payload = {
-                contents: [{ parts: [{ text: text }] }],
-                generationConfig: {
-                    responseModalities: ["AUDIO"],
-                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Fenrir" } } }
-                },
-                model: "gemini-2.5-flash-preview-tts"
-            };
-            try {
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload) 
-                });
-                
-                if (!response.ok) {
-                    if (response.status === 404) throw new Error("Modelo TTS indisponível para chaves públicas.");
-                    throw new Error(`API Error: ${response.status}`);
-                }
-
-                const data = await response.json();
-                const base64 = data.candidates[0].content.parts[0].inlineData.data;
-                
-                const binaryString = atob(base64);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-                const pcmData = new Int16Array(bytes.buffer);
-                
-                const sampleRate = 24000;
-                const buffer = new ArrayBuffer(44 + pcmData.length * 2);
-                const view = new DataView(buffer);
-                const writeString = (v, o, s) => { for (let i=0; i<s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
-                
-                writeString(view, 0, 'RIFF');
-                view.setUint32(4, 36 + pcmData.length * 2, true);
-                writeString(view, 8, 'WAVE');
-                writeString(view, 12, 'fmt ');
-                view.setUint32(16, 16, true);
-                view.setUint16(20, 1, true); 
-                view.setUint16(22, 1, true); 
-                view.setUint32(24, sampleRate, true);
-                view.setUint32(28, sampleRate * 2, true); 
-                view.setUint16(32, 2, true); 
-                view.setUint16(34, 16, true); 
-                writeString(view, 36, 'data');
-                view.setUint32(40, pcmData.length * 2, true);
-                
-                const blob = new Blob([view], { type: 'audio/wav' });
-                return URL.createObjectURL(blob);
-            } catch (error) {
-                console.error("Erro ao gerar áudio:", error);
-                return null; 
-            }
-        };
-
         // --- COMPONENTES DA INTERFACE ---
-
         const Icon = ({ name, size = 24, className = "" }) => {
             const iconRef = useRef(null);
             useEffect(() => {
@@ -231,6 +136,7 @@
 
         const App = () => {
             const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
+            const [selectedModel, setSelectedModel] = useState(localStorage.getItem('nexus_ai_model') || 'gemini-1.5-flash');
             const [gameState, setGameState] = useState(null);
             const [currentTab, setCurrentTab] = useState('historia');
             const [loadingStr, setLoadingStr] = useState('');
@@ -238,7 +144,7 @@
             const audioRef = useRef(null);
 
             const [setupData, setSetupData] = useState({
-                type: 'original', genre: 'Fantasia Medieval', universe: '', customDetails: '',
+                type: 'original', genre: 'Fantasia Sombria', universe: '', customDetails: '',
                 charName: '', charRace: '', charClass: '', charBg: '', charAvatar: null
             });
 
@@ -297,10 +203,14 @@
             };
 
             const handleError = (e) => {
-                if (e.message && e.message.includes('401')) {
+                if (e.message && e.message.includes('404')) {
+                    alert(`Erro 404: O modelo '${selectedModel}' não está disponível para a sua chave de API. Tente trocar para o Gemini 1.5 Flash nas configurações.`);
+                } else if (e.message && e.message.includes('401')) {
                     alert("Erro de Autenticação (401): A chave da API é inválida. Verifique sua chave nas configurações iniciais.");
+                } else if (e.message && e.message.includes('400')) {
+                    alert("Erro de Requisição (400): JSON malformado ou contexto muito grande. Se o erro persistir, o modelo selecionado pode estar instável.");
                 } else {
-                    alert("Erro de conexão com a API: " + e.message + ". Tente novamente.");
+                    alert("Erro de conexão: " + e.message + ". Tente novamente.");
                 }
                 setLoadingStr('');
             };
@@ -309,14 +219,15 @@
                 if (!setupData.charName) return alert("Dê um nome ao seu personagem.");
                 if (!apiKey.trim()) return alert("Insira a chave da API do Gemini para jogar.");
                 
-                setLoadingStr('Gerando aventura e atributos...');
+                setLoadingStr('Calculando atributos e gerando o mundo...');
                 
                 const sysPrompt = `Você é um mestre de RPG. Crie os atributos iniciais, itens básicos e a cena inicial.
                 Jogador: ${setupData.charName}, Raça: ${setupData.charRace}, Classe: ${setupData.charClass}.
                 História de Fundo: ${setupData.charBg}.
                 Campanha: ${setupData.type === 'custom' ? `Universo: ${setupData.universe}. Detalhes: ${setupData.customDetails}` : `Gênero: ${setupData.genre}`}.
-                Retorne EXATAMENTE este JSON:
+                Retorne EXATAMENTE este JSON puro (sem markdown):
                 {
+                    "reasoning": "Breve lógica de mestre sobre como a classe e história do jogador influenciaram os atributos e itens escolhidos.",
                     "attributes": {"forca": int, "destreza": int, "inteligencia": int, "carisma": int, "constituicao": int},
                     "skills": ["habilidade1", "habilidade2"],
                     "inventory": [{"name": "Item inicial", "desc": "descrição", "damage": "1d4 (se arma)", "type": "arma/documento/geral"}],
@@ -326,21 +237,23 @@
                 }`;
 
                 try {
-                    const response = await callGemini(apiKey, "Inicie o jogo.", sysPrompt, true);
+                    const response = await callGemini(apiKey, selectedModel, "Inicie o jogo e construa a ficha.", sysPrompt, true);
                     
                     const newGame = {
+                        aiModel: selectedModel,
                         player: {
                             name: setupData.charName, race: setupData.charRace, class: setupData.charClass,
                             hp: 100, maxHp: 100, sanity: 100, maxSanity: 100, exp: 0, effort: 50, maxEffort: 50,
-                            attributes: response.attributes, skills: response.skills, backstory: setupData.charBg,
+                            attributes: response.attributes || {forca: 10, destreza: 10, inteligencia: 10, carisma: 10, constituicao: 10}, 
+                            skills: response.skills || [], backstory: setupData.charBg,
                             avatar: setupData.charAvatar
                         },
                         context: { type: setupData.type, genre: setupData.genre, universe: setupData.universe },
-                        location: response.location,
+                        location: response.location || "Ponto de Origem",
                         party: [],
-                        inventory: { items: response.inventory, capacity: response.attributes.forca * 2 + 10 },
+                        inventory: { items: response.inventory || [], capacity: (response.attributes?.forca || 10) * 2 + 10 },
                         relationships: [],
-                        story: [{ role: 'system', text: response.narration }],
+                        story: [{ role: 'system', reasoning: response.reasoning, text: response.narration }],
                         musicMood: response.musicMood || 'ambiente_calmo'
                     };
                     
@@ -359,12 +272,15 @@
                 
                 const newStory = [...gameState.story, { role: 'user', type: actionType, text: text }];
                 setGameState(prev => ({ ...prev, story: newStory }));
-                setLoadingStr('Mestre pensando...');
+                setLoadingStr('Mestre raciocinando...');
 
-                const sysPrompt = `Você é um mestre de RPG avançado. Analise a ação do jogador e atualize o mundo.
-                REGRAS RÍGIDAS DE RETORNO (JSON ONLY):
+                const sysPrompt = `Você é um mestre de RPG avançado e implacável. Analise a ação do jogador contra os atributos dele e aplique as regras do mundo.
+                OBRIGATÓRIO: Pense passo a passo na chave "reasoning" antes de ditar o resultado. Analise se a ação é possível, faça uma "rolagem de dados virtual" contra a dificuldade e calcule os danos ou ganhos.
+                
+                Retorne EXATAMENTE este JSON puro (sem markdown):
                 {
-                    "narration": "Sua resposta imersiva. Descreva as consequências.",
+                    "reasoning": "Descreva sua lógica de mestre (Ex: 'O jogador tentou atacar o goblin. Dificuldade 15. Força é 14. Rolou 12. Falha. O goblin ataca de volta causando 5 de dano').",
+                    "narration": "Sua resposta imersiva e narrativa do que aconteceu após o cálculo.",
                     "locationUpdate": "Nome do local (atualize se ele viajou, senão repita o atual)",
                     "hpDelta": número (negativo se tomou dano, positivo se curou, 0 se nada),
                     "sanityDelta": número,
@@ -377,19 +293,21 @@
                     "musicMood": "escolha: combate_padrao, combate_dificil, boss, ambiente_calmo, investigativo, opressivo, tensao"
                 }
                 
-                ESTADO ATUAL:
-                Jogador: Vida ${gameState.player.hp}, Sanidade ${gameState.player.sanity}.
-                Local: ${gameState.location}. Grupo: ${gameState.party.join(', ')}.
-                Inventário: ${gameState.inventory.items.map(i=>i.name).join(', ')}.
-                Últimas mensagens do histórico: ${JSON.stringify(newStory.slice(-4))}`;
+                ESTADO ATUAL DO JOGO:
+                Jogador: Vida ${gameState.player.hp}, Sanidade ${gameState.player.sanity}, Mana/Stamina ${gameState.player.effort}.
+                Atributos: ${JSON.stringify(gameState.player.attributes)}
+                Local: ${gameState.location}. Grupo: ${gameState.party.join(', ') || 'Sozinho'}.
+                Inventário: ${gameState.inventory.items.map(i=>i.name).join(', ') || 'Vazio'}.
+                Últimos Eventos: ${JSON.stringify(newStory.slice(-3))}`;
 
-                const userPrompt = `O jogador escolheu [${actionType.toUpperCase()}]: "${text}"`;
+                const userPrompt = `Ação escolhida [${actionType.toUpperCase()}]: "${text}"`;
 
                 try {
-                    const response = await callGemini(apiKey, userPrompt, sysPrompt, true);
+                    const response = await callGemini(apiKey, gameState.aiModel || selectedModel, userPrompt, sysPrompt, true);
                     
                     setGameState(prev => {
                         let newState = { ...prev };
+                        
                         newState.player.hp = Math.min(prev.player.maxHp, Math.max(0, prev.player.hp + (response.hpDelta || 0)));
                         newState.player.sanity = Math.min(prev.player.maxSanity, Math.max(0, prev.player.sanity + (response.sanityDelta || 0)));
                         newState.player.exp += (response.expDelta || 0);
@@ -427,7 +345,7 @@
                         }
                         newState.relationships = newRels;
 
-                        newState.story = [...newStory, { role: 'system', text: response.narration }];
+                        newState.story = [...newStory, { role: 'system', reasoning: response.reasoning, text: response.narration }];
                         if (response.musicMood) newState.musicMood = response.musicMood;
 
                         saveGame(newState);
@@ -449,24 +367,12 @@
                 reader.readAsDataURL(file);
             };
 
-            const generateAvatar = async (prompt, callback) => {
-                if (!apiKey.trim()) return alert("Insira a chave da API do Gemini primeiro.");
-                setLoadingStr("Gerando imagem...");
-                const imgBase64 = await callGeminiImage(apiKey, prompt);
-                if (imgBase64) {
-                    callback(imgBase64);
-                } else {
-                    alert("Aviso: Falha ao gerar imagem. Confirme se sua API Key tem suporte e faturamento ativado para o modelo Imagen no Google AI Studio.");
-                }
-                setLoadingStr("");
-            };
-
             if (!gameState && !setupData.startedSetup) {
                 return (
                     <div className="min-h-screen flex items-center justify-center p-4">
-                        <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center space-y-6">
-                            <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">NEXUS RPG</h1>
-                            <p className="text-slate-400">Inteligência Artificial Direcionando seu Destino</p>
+                        <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center space-y-6 shadow-2xl">
+                            <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 tracking-wider">NEXUS RPG</h1>
+                            <p className="text-slate-400 text-sm">Sua Aventura Guiada por Inteligência Artificial</p>
                             
                             <div className="space-y-4 pt-4">
                                 <button 
@@ -474,26 +380,42 @@
                                         if (!apiKey.trim()) return alert("Por favor, insira sua chave da API do Google Gemini antes de continuar.");
                                         setSetupData({...setupData, startedSetup: true});
                                     }} 
-                                    className="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition">
+                                    className="w-full py-3 bg-blue-600 hover:bg-blue-500 rounded-lg font-bold shadow-lg transition-all transform hover:scale-[1.02]">
                                     Nova Campanha
                                 </button>
-                                <button onClick={loadGame} className="w-full py-3 bg-slate-700 hover:bg-slate-600 rounded-lg font-semibold transition">Carregar Jogo Salvo</button>
+                                <button onClick={loadGame} className="w-full py-3 bg-slate-700 hover:bg-slate-600 rounded-lg font-semibold transition-colors">Carregar Save Local</button>
 
-                                <div className="pt-6 border-t border-slate-700 text-left">
-                                    <label className="block text-sm font-medium mb-1 text-slate-300">Google Gemini API Key</label>
-                                    <input 
-                                        type="password" 
-                                        value={apiKey} 
-                                        onChange={(e) => { 
-                                            setApiKey(e.target.value); 
-                                            localStorage.setItem('gemini_api_key', e.target.value); 
-                                        }} 
-                                        className="w-full bg-slate-800 border border-slate-600 rounded p-2 focus:border-blue-500 outline-none text-sm text-white placeholder-slate-500" 
-                                        placeholder="Cole sua chave AIzaSy... aqui" 
-                                    />
-                                    <p className="text-[11px] text-slate-500 mt-2">
-                                        Sua chave é salva apenas localmente no seu navegador e é usada para comunicar diretamente com o Google.
-                                    </p>
+                                <div className="pt-8 text-left space-y-4">
+                                    <div className="space-y-1">
+                                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">Credenciais API</label>
+                                        <input 
+                                            type="password" 
+                                            value={apiKey} 
+                                            onChange={(e) => { 
+                                                setApiKey(e.target.value); 
+                                                localStorage.setItem('gemini_api_key', e.target.value); 
+                                            }} 
+                                            className="w-full bg-slate-900 border border-slate-700 rounded p-3 focus:border-blue-500 outline-none text-sm text-white placeholder-slate-600" 
+                                            placeholder="Cole sua Gemini API Key (AIzaSy...)" 
+                                        />
+                                    </div>
+                                    
+                                    <div className="space-y-1">
+                                        <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">Motor de IA (Cérebro do Mestre)</label>
+                                        <select 
+                                            value={selectedModel} 
+                                            onChange={(e) => {
+                                                setSelectedModel(e.target.value);
+                                                localStorage.setItem('nexus_ai_model', e.target.value);
+                                            }}
+                                            className="w-full bg-slate-900 border border-slate-700 rounded p-3 focus:border-blue-500 outline-none text-sm text-white"
+                                        >
+                                            <option value="gemini-1.5-flash">Gemini 1.5 Flash (Recomendado - Rápido)</option>
+                                            <option value="gemini-2.0-flash">Gemini 2.0 Flash (Mais Inteligente)</option>
+                                            <option value="gemini-2.0-flash-thinking-exp-01-21">Gemini 2.0 Thinking (Experimental)</option>
+                                            <option value="gemini-1.5-pro">Gemini 1.5 Pro (Pesado / Limite Rigoroso)</option>
+                                        </select>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -504,62 +426,62 @@
             if (setupData.startedSetup && !gameState) {
                 return (
                     <div className="min-h-screen p-4 md:p-8 flex justify-center">
-                        <div className="glass-panel p-6 rounded-xl max-w-3xl w-full space-y-8 custom-scrollbar overflow-y-auto max-h-full">
+                        <div className="glass-panel p-6 rounded-xl max-w-3xl w-full space-y-8 custom-scrollbar overflow-y-auto max-h-full shadow-2xl">
                             <h2 className="text-2xl font-bold border-b border-slate-700 pb-2">Configuração da Campanha</h2>
                             
                             {loadingStr ? (
                                 <div className="flex flex-col items-center justify-center py-20 space-y-4">
                                     <Icon name="loader-2" className="animate-spin text-blue-500" size={48} />
-                                    <p className="text-lg animate-pulse">{loadingStr}</p>
+                                    <p className="text-lg animate-pulse font-semibold">{loadingStr}</p>
+                                    <p className="text-xs text-slate-400">Pode levar alguns segundos dependendo do modelo escolhido.</p>
                                 </div>
                             ) : (
                                 <div className="space-y-6">
                                     <div className="space-y-2">
-                                        <h3 className="text-lg font-semibold text-blue-400">1. O Mundo</h3>
+                                        <h3 className="text-lg font-semibold text-blue-400 flex items-center gap-2"><Icon name="globe" size={20}/> 1. O Mundo</h3>
                                         <div className="flex gap-4">
-                                            <button onClick={() => setSetupData({...setupData, type: 'original'})} className={`flex-1 py-2 rounded border ${setupData.type === 'original' ? 'bg-blue-600 border-blue-400' : 'border-slate-600 hover:bg-slate-800'}`}>Original</button>
-                                            <button onClick={() => setSetupData({...setupData, type: 'custom'})} className={`flex-1 py-2 rounded border ${setupData.type === 'custom' ? 'bg-purple-600 border-purple-400' : 'border-slate-600 hover:bg-slate-800'}`}>Personalizado</button>
+                                            <button onClick={() => setSetupData({...setupData, type: 'original'})} className={`flex-1 py-2 rounded border ${setupData.type === 'original' ? 'bg-blue-600 border-blue-400 font-bold' : 'border-slate-600 hover:bg-slate-800'}`}>Original</button>
+                                            <button onClick={() => setSetupData({...setupData, type: 'custom'})} className={`flex-1 py-2 rounded border ${setupData.type === 'custom' ? 'bg-purple-600 border-purple-400 font-bold' : 'border-slate-600 hover:bg-slate-800'}`}>Personalizado</button>
                                         </div>
                                         
                                         {setupData.type === 'original' ? (
-                                            <input type="text" placeholder="Gênero (ex: Fantasia Sombria, Cyberpunk, Sci-fi)" value={setupData.genre} onChange={e=>setSetupData({...setupData, genre: e.target.value})} className="w-full bg-slate-800 p-2 rounded" />
+                                            <input type="text" placeholder="Gênero do jogo (ex: Fantasia Sombria, Cyberpunk, Sobrevivência Espacial)" value={setupData.genre} onChange={e=>setSetupData({...setupData, genre: e.target.value})} className="w-full bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none" />
                                         ) : (
                                             <div className="space-y-2">
-                                                <input type="text" placeholder="Qual Universo? (ex: Star Wars, Senhor dos Anéis)" value={setupData.universe} onChange={e=>setSetupData({...setupData, universe: e.target.value})} className="w-full bg-slate-800 p-2 rounded" />
-                                                <textarea placeholder="Detalhes (ex: Quero que o Darth Vader seja meu mestre, o tom deve ser sombrio...)" value={setupData.customDetails} onChange={e=>setSetupData({...setupData, customDetails: e.target.value})} className="w-full bg-slate-800 p-2 rounded h-24"></textarea>
+                                                <input type="text" placeholder="Qual Universo Famoso? (ex: Dungeons & Dragons, Matrix, Ordem Paranormal)" value={setupData.universe} onChange={e=>setSetupData({...setupData, universe: e.target.value})} className="w-full bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none" />
+                                                <textarea placeholder="Detalhes Específicos (ex: Quero que a história seja focada em furtividade, o vilão principal será um vampiro...)" value={setupData.customDetails} onChange={e=>setSetupData({...setupData, customDetails: e.target.value})} className="w-full bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none h-24"></textarea>
                                             </div>
                                         )}
                                     </div>
 
                                     <div className="space-y-4">
-                                        <h3 className="text-lg font-semibold text-blue-400">2. Seu Personagem</h3>
+                                        <h3 className="text-lg font-semibold text-blue-400 flex items-center gap-2"><Icon name="swords" size={20}/> 2. Seu Personagem</h3>
                                         
                                         <div className="flex flex-col md:flex-row gap-6">
-                                            <div className="w-32 h-32 shrink-0 bg-slate-800 rounded-lg border border-slate-600 flex items-center justify-center overflow-hidden relative group">
+                                            <div className="w-32 h-32 shrink-0 bg-slate-900 rounded-lg border border-slate-600 flex items-center justify-center overflow-hidden relative group">
                                                 {setupData.charAvatar ? (
                                                     <img src={setupData.charAvatar} alt="Avatar" className="w-full h-full object-cover" />
-                                                ) : <Icon name="user" size={48} className="text-slate-500" />}
+                                                ) : <Icon name="image-plus" size={32} className="text-slate-600" />}
                                                 
-                                                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity gap-2">
-                                                    <label className="cursor-pointer text-xs bg-blue-600 px-2 py-1 rounded hover:bg-blue-500">
-                                                        Upar
+                                                <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity">
+                                                    <label className="cursor-pointer text-xs bg-blue-600 px-3 py-2 rounded hover:bg-blue-500 font-semibold shadow">
+                                                        Upar Foto
                                                         <input type="file" className="hidden" accept="image/*" onChange={(e) => handleImageUpload(e, img => setSetupData({...setupData, charAvatar: img}))} />
                                                     </label>
-                                                    <button onClick={() => generateAvatar(`Um retrato estilo RPG de ${setupData.charName}, raça ${setupData.charRace}, classe ${setupData.charClass}. Foco no rosto, alta qualidade.`, img => setSetupData({...setupData, charAvatar: img}))} className="text-xs bg-purple-600 px-2 py-1 rounded hover:bg-purple-500">Gerar IA</button>
                                                 </div>
                                             </div>
                                             
                                             <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
-                                                <input type="text" placeholder="Nome" value={setupData.charName} onChange={e=>setSetupData({...setupData, charName: e.target.value})} className="bg-slate-800 p-2 rounded" />
-                                                <input type="text" placeholder="Raça" value={setupData.charRace} onChange={e=>setSetupData({...setupData, charRace: e.target.value})} className="bg-slate-800 p-2 rounded" />
-                                                <input type="text" placeholder="Classe / Profissão" value={setupData.charClass} onChange={e=>setSetupData({...setupData, charClass: e.target.value})} className="bg-slate-800 p-2 rounded md:col-span-2" />
+                                                <input type="text" placeholder="Nome" value={setupData.charName} onChange={e=>setSetupData({...setupData, charName: e.target.value})} className="bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none" />
+                                                <input type="text" placeholder="Raça / Espécie" value={setupData.charRace} onChange={e=>setSetupData({...setupData, charRace: e.target.value})} className="bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none" />
+                                                <input type="text" placeholder="Classe / Profissão (Ex: Paladino, Hacker, Detetive)" value={setupData.charClass} onChange={e=>setSetupData({...setupData, charClass: e.target.value})} className="bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none md:col-span-2" />
                                             </div>
                                         </div>
-                                        <textarea placeholder="Sua história de fundo (A IA usará isso para criar sua aventura e atributos)..." value={setupData.charBg} onChange={e=>setSetupData({...setupData, charBg: e.target.value})} className="w-full bg-slate-800 p-2 rounded h-24"></textarea>
+                                        <textarea placeholder="Sua história de fundo (O Mestre usará isso para calcular seus atributos iniciais e gerar a história)..." value={setupData.charBg} onChange={e=>setSetupData({...setupData, charBg: e.target.value})} className="w-full bg-slate-900 border border-slate-700 p-3 rounded focus:border-blue-500 outline-none h-24"></textarea>
                                     </div>
 
-                                    <button onClick={startGame} className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 rounded-lg font-bold text-lg shadow-lg">Começar Aventura</button>
-                                    <button onClick={() => setSetupData({...setupData, startedSetup: false})} className="w-full py-2 text-slate-400 hover:text-white">Voltar</button>
+                                    <button onClick={startGame} className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 rounded-lg font-black text-xl shadow-lg transform hover:scale-[1.01] transition-all">Iniciar Aventura</button>
+                                    <button onClick={() => setSetupData({...setupData, startedSetup: false})} className="w-full py-2 text-slate-500 hover:text-slate-300 font-semibold">Voltar ao Menu</button>
                                 </div>
                             )}
                         </div>
@@ -576,34 +498,34 @@
                     <header className="glass-panel shrink-0 p-3 md:p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 z-10 shadow-md">
                         <div className="flex items-center gap-4">
                             <div className="w-12 h-12 md:w-16 md:h-16 rounded-full overflow-hidden border-2 border-slate-600 shrink-0">
-                                {p.avatar ? <img src={p.avatar} className="w-full h-full object-cover" /> : <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Icon name="user" /></div>}
+                                {p.avatar ? <img src={p.avatar} className="w-full h-full object-cover" /> : <div className="w-full h-full bg-slate-800 flex items-center justify-center"><Icon name="user" className="text-slate-500"/></div>}
                             </div>
                             <div className="flex flex-col">
                                 <h2 className="font-bold text-lg leading-tight text-blue-300">{p.name}</h2>
-                                <span className="text-xs text-slate-400 mb-1">Nvl {Math.floor(p.exp/100)+1} | EXP: {p.exp}</span>
+                                <span className="text-xs text-slate-400 mb-1">Nível {Math.floor(p.exp/100)+1} | EXP: {p.exp}</span>
                                 <div className="flex gap-2">
-                                    <div className="w-20 md:w-24 bg-slate-800 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Vida">
-                                        <div className="bg-red-500 h-full transition-all duration-300" style={{width: `${(p.hp/p.maxHp)*100}%`}}></div>
-                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">{p.hp}/{p.maxHp}</span>
+                                    <div className="w-20 md:w-24 bg-slate-900 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Pontos de Vida">
+                                        <div className="bg-red-600 h-full transition-all duration-300" style={{width: `${(p.hp/p.maxHp)*100}%`}}></div>
+                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold shadow-black drop-shadow-md">{p.hp}/{p.maxHp} HP</span>
                                     </div>
-                                    <div className="w-20 md:w-24 bg-slate-800 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Sanidade">
-                                        <div className="bg-purple-500 h-full transition-all duration-300" style={{width: `${(p.sanity/p.maxSanity)*100}%`}}></div>
-                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">{p.sanity}/{p.maxSanity}</span>
+                                    <div className="w-20 md:w-24 bg-slate-900 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Sanidade Mental">
+                                        <div className="bg-purple-600 h-full transition-all duration-300" style={{width: `${(p.sanity/p.maxSanity)*100}%`}}></div>
+                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold shadow-black drop-shadow-md">{p.sanity}/{p.maxSanity} SAN</span>
                                     </div>
-                                    <div className="w-20 md:w-24 bg-slate-800 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Esforço (Mana/Stamina)">
-                                        <div className="bg-blue-500 h-full transition-all duration-300" style={{width: `${(p.effort/p.maxEffort)*100}%`}}></div>
-                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">{p.effort}/{p.maxEffort}</span>
+                                    <div className="w-20 md:w-24 bg-slate-900 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Esforço (Stamina/Mana)">
+                                        <div className="bg-blue-600 h-full transition-all duration-300" style={{width: `${(p.effort/p.maxEffort)*100}%`}}></div>
+                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold shadow-black drop-shadow-md">{p.effort}/{p.maxEffort} STA</span>
                                     </div>
                                 </div>
                             </div>
                         </div>
 
-                        <div className="flex flex-col md:items-end w-full md:w-auto bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                        <div className="flex flex-col md:items-end w-full md:w-auto bg-slate-900/80 p-2 rounded-lg border border-slate-700/50 shadow-inner">
                             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm md:text-base">
                                 <Icon name="map-pin" size={16} /> {gameState.location}
                             </div>
                             <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
-                                <Icon name="users" size={12} /> Grupo: {gameState.party.length > 0 ? gameState.party.join(', ') : 'Sozinho'}
+                                <Icon name="users" size={12} /> Grupo: {gameState.party.length > 0 ? gameState.party.join(', ') : 'Você está sozinho'}
                             </div>
                         </div>
                     </header>
@@ -613,25 +535,26 @@
                             {id: 'historia', icon: 'book-open', label: 'História'},
                             {id: 'inventario', icon: 'briefcase', label: 'Inventário'},
                             {id: 'relacionamentos', icon: 'heart-handshake', label: 'Relacionamentos'},
-                            {id: 'musica', icon: 'music', label: 'Músicas'},
-                            {id: 'sistema', icon: 'settings', label: 'Sistema'}
+                            {id: 'musica', icon: 'music', label: 'Trilha Sonora'},
+                            {id: 'sistema', icon: 'settings', label: 'Ficha & Sistema'}
                         ].map(tab => (
                             <button key={tab.id} onClick={() => setCurrentTab(tab.id)} 
-                                className={`flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 ${currentTab === tab.id ? 'border-blue-500 text-blue-400 bg-slate-800/50' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/30'}`}>
+                                className={`flex items-center gap-2 px-5 py-3 text-sm font-semibold whitespace-nowrap transition-all border-b-2 ${currentTab === tab.id ? 'border-blue-500 text-blue-400 bg-slate-800/50' : 'border-transparent text-slate-500 hover:text-slate-300 hover:bg-slate-800/30'}`}>
                                 <Icon name={tab.icon} size={16} /> {tab.label}
                             </button>
                         ))}
                     </div>
 
-                    <main className="flex-1 overflow-hidden relative">
+                    <main className="flex-1 overflow-hidden relative bg-[#0f172a] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 to-[#0f172a]">
                         {currentTab === 'historia' && (
-                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} apiKey={apiKey} />
+                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} apiKey={apiKey} aiModel={gameState.aiModel || selectedModel} />
                         )}
                         {currentTab === 'inventario' && (
                             <InventoryTab 
                                 inventory={gameState.inventory} 
                                 attributes={p.attributes} 
                                 apiKey={apiKey}
+                                aiModel={gameState.aiModel || selectedModel}
                                 updateInventory={(newItems) => {
                                     const newState = {...gameState, inventory: {...gameState.inventory, items: newItems}};
                                     setGameState(newState);
@@ -640,128 +563,90 @@
                             />
                         )}
                         {currentTab === 'relacionamentos' && (
-                            <RelationshipsTab 
-                                rels={gameState.relationships} 
-                                apiKey={apiKey}
-                                updateRel={(idx, data) => {
-                                    const newRels = [...gameState.relationships];
-                                    newRels[idx] = {...newRels[idx], ...data};
-                                    setGameState({...gameState, relationships: newRels});
-                                    saveGame({...gameState, relationships: newRels});
-                                }}
-                            />
+                            <RelationshipsTab rels={gameState.relationships} updateRel={(idx, data) => {
+                                const newRels = [...gameState.relationships];
+                                newRels[idx] = {...newRels[idx], ...data};
+                                setGameState({...gameState, relationships: newRels});
+                                saveGame({...gameState, relationships: newRels});
+                            }}/>
                         )}
                         {currentTab === 'musica' && (
                             <MusicTab audioTracks={audioTracks} setAudioTracks={setAudioTracks} currentMood={gameState.musicMood} />
                         )}
                         {currentTab === 'sistema' && (
-                            <SystemTab player={p} exportSave={exportSave} importSave={importSave} />
+                            <SystemTab player={p} exportSave={exportSave} importSave={importSave} aiModel={gameState.aiModel || selectedModel} />
                         )}
                     </main>
                 </div>
             );
         };
 
-        const StoryTab = ({ story, onAction, isLoading, apiKey }) => {
+        const StoryTab = ({ story, onAction, isLoading, apiKey, aiModel }) => {
             const endRef = useRef(null);
             const [inputText, setInputText] = useState('');
             const [actionType, setActionType] = useState('ação');
-            const [hints, setHints] = useState([]);
-            const [isFetchingHints, setIsFetchingHints] = useState(false);
-            const [playingAudio, setPlayingAudio] = useState(null);
 
-            useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [story, isLoading, hints]);
+            useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [story, isLoading]);
 
             const handleSubmit = (e) => {
                 e.preventDefault();
                 onAction(actionType, inputText);
                 setInputText('');
-                setHints([]);
-            };
-
-            const handleGetHints = async () => {
-                if (!apiKey) return alert("API Key necessária.");
-                setIsFetchingHints(true);
-                const sysPrompt = `Analise a última narração e sugira 3 opções curtas de ação criativas para o jogador (máx 5 palavras cada). Retorne JSON: {"hints": ["opção 1", "opção 2", "opção 3"]}`;
-                const promptText = `Última narração: ${story[story.length - 1]?.text || 'Início da aventura'}`;
-                try {
-                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
-                    if (res && res.hints) setHints(res.hints);
-                } catch (e) { console.error(e); }
-                setIsFetchingHints(false);
-            };
-
-            const handlePlayTTS = async (text) => {
-                if (!apiKey) return alert("API Key necessária para narração.");
-                if (playingAudio) {
-                    if (playingAudio !== 'loading') playingAudio.pause();
-                    setPlayingAudio(null);
-                    return;
-                }
-                setPlayingAudio('loading');
-                const cleanText = text.replace(/<[^>]*>?/gm, ''); 
-                const audioUrl = await callGeminiTTS(apiKey, cleanText);
-                if (audioUrl) {
-                    const audio = new Audio(audioUrl);
-                    audio.onended = () => setPlayingAudio(null);
-                    audio.play();
-                    setPlayingAudio(audio);
-                } else {
-                    setPlayingAudio(null);
-                    alert("O modelo de voz é uma função experimental e ainda não está disponível para o público. Ele funciona apenas no ambiente de testes do Google.");
-                }
             };
 
             return (
                 <div className="h-full flex flex-col relative">
-                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar">
+                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar pb-32">
                         {story.map((msg, i) => (
                             <div key={i} className={`flex flex-col max-w-4xl mx-auto ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                                 {msg.role === 'system' ? (
-                                    <div className="bg-slate-800/80 border border-slate-700 rounded-2xl rounded-tl-none p-4 md:p-5 shadow-sm text-slate-200 leading-relaxed text-[15px] md:text-base relative group">
+                                    <div className="bg-slate-800/90 border border-slate-700/80 rounded-2xl rounded-tl-none p-5 shadow-lg text-slate-200 leading-relaxed text-[15px] md:text-base w-full shadow-[0_4px_20px_-4px_rgba(0,0,0,0.5)]">
+                                        
+                                        {/* NOVO: Bloco de Raciocínio (Chain of Thought) */}
+                                        {msg.reasoning && (
+                                            <div className="mb-4 bg-slate-900/80 border-l-2 border-purple-500 p-3 rounded-r-lg">
+                                                <div className="flex items-center gap-2 text-purple-400 font-bold text-xs uppercase mb-1">
+                                                    <Icon name="brain-circuit" size={14}/>
+                                                    Lógica do Mestre
+                                                </div>
+                                                <p className="text-sm text-slate-400 font-mono italic">"{msg.reasoning}"</p>
+                                            </div>
+                                        )}
+
                                         <p dangerouslySetInnerHTML={{__html: msg.text.replace(/\n/g, '<br/>')}}></p>
-                                        <button onClick={() => handlePlayTTS(msg.text)} className="absolute -right-3 -top-3 bg-purple-600 hover:bg-purple-500 text-white p-2 rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-opacity" title="✨ Voz do Mestre">
-                                            <Icon name={playingAudio === 'loading' ? 'loader-2' : playingAudio ? 'square' : 'volume-2'} size={14} className={playingAudio === 'loading' ? 'animate-spin' : ''} />
-                                        </button>
                                     </div>
                                 ) : (
-                                    <div className={`rounded-2xl rounded-tr-none p-3 shadow-sm max-w-[85%] ${
+                                    <div className={`rounded-2xl rounded-tr-none p-4 shadow-md max-w-[85%] ${
                                         msg.type === 'fala' ? 'bg-indigo-900/60 border border-indigo-700/50 text-indigo-100' : 
                                         msg.type === 'observação' ? 'bg-emerald-900/60 border border-emerald-700/50 text-emerald-100' :
                                         'bg-blue-900/60 border border-blue-700/50 text-blue-100'
                                     }`}>
-                                        <span className="text-[10px] uppercase opacity-60 font-bold block mb-1">{msg.type}</span>
-                                        <p>{msg.text}</p>
+                                        <div className="flex items-center gap-1.5 opacity-60 mb-1">
+                                            <Icon name={msg.type === 'fala' ? 'message-circle' : msg.type === 'observação' ? 'eye' : 'swords'} size={12} />
+                                            <span className="text-[10px] uppercase font-bold tracking-wider">{msg.type}</span>
+                                        </div>
+                                        <p className="font-medium">{msg.text}</p>
                                     </div>
                                 )}
                             </div>
                         ))}
                         {isLoading && (
                             <div className="flex max-w-4xl mx-auto items-start">
-                                <div className="bg-slate-800/50 border border-slate-700 rounded-2xl rounded-tl-none p-4 flex items-center gap-3">
-                                    <Icon name="loader-2" className="animate-spin text-blue-400" size={18} />
-                                    <span className="text-slate-400 text-sm animate-pulse">{isLoading}</span>
+                                <div className="bg-slate-800/80 border border-slate-700 rounded-2xl rounded-tl-none p-4 flex items-center gap-3 shadow-lg">
+                                    <Icon name="loader-2" className="animate-spin text-purple-500" size={20} />
+                                    <span className="text-slate-300 font-medium animate-pulse">{isLoading}</span>
                                 </div>
                             </div>
                         )}
                         <div ref={endRef} className="h-4"></div>
                     </div>
 
-                    <div className="shrink-0 p-4 glass-panel border-t-0 pb-safe flex flex-col">
-                        {hints.length > 0 && (
-                            <div className="max-w-4xl mx-auto w-full mb-3 flex flex-wrap gap-2">
-                                {hints.map((hint, idx) => (
-                                    <button key={idx} onClick={() => setInputText(hint)} className="bg-blue-900/50 hover:bg-blue-800/70 border border-blue-700/50 text-blue-200 text-xs px-3 py-1.5 rounded-full transition-colors">
-                                        ✨ {hint}
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                        <form onSubmit={handleSubmit} className="max-w-4xl mx-auto w-full flex flex-col md:flex-row gap-2 relative">
-                            <select value={actionType} onChange={e=>setActionType(e.target.value)} className="bg-slate-800 border border-slate-600 text-sm rounded-lg p-2 md:w-32 outline-none focus:border-blue-500">
-                                <option value="ação">Ação</option>
-                                <option value="fala">Fala</option>
-                                <option value="observação">Observar/Info</option>
+                    <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-[#0f172a] via-[#0f172a] to-transparent pt-12">
+                        <form onSubmit={handleSubmit} className="max-w-4xl mx-auto w-full flex flex-col md:flex-row gap-2 relative bg-slate-800/90 backdrop-blur-md p-2 rounded-xl border border-slate-700 shadow-[0_0_30px_rgba(0,0,0,0.5)]">
+                            <select value={actionType} onChange={e=>setActionType(e.target.value)} className="bg-slate-900 border border-slate-700 text-sm rounded-lg p-3 md:w-36 outline-none focus:border-blue-500 font-semibold text-slate-300">
+                                <option value="ação">AÇÃO</option>
+                                <option value="fala">FALAR</option>
+                                <option value="observação">OBSERVAR</option>
                             </select>
                             <input 
                                 type="text" 
@@ -769,13 +654,10 @@
                                 onChange={e=>setInputText(e.target.value)} 
                                 placeholder="O que você faz?" 
                                 disabled={!!isLoading}
-                                className="flex-1 bg-slate-900/80 border border-slate-600 rounded-lg p-3 outline-none focus:border-blue-500 placeholder-slate-500 disabled:opacity-50"
+                                className="flex-1 bg-transparent rounded-lg p-3 outline-none text-slate-100 placeholder-slate-500 disabled:opacity-50 text-base"
                             />
-                            <button type="button" onClick={handleGetHints} disabled={!!isLoading || isFetchingHints} className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-amber-300 p-3 rounded-lg transition-colors flex items-center justify-center min-w-[50px]" title="✨ Intuição">
-                                <Icon name={isFetchingHints ? 'loader-2' : 'sparkles'} size={20} className={isFetchingHints ? 'animate-spin' : ''} />
-                            </button>
-                            <button type="submit" disabled={!inputText.trim() || !!isLoading} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white p-3 rounded-lg transition-colors flex items-center justify-center min-w-[50px]">
-                                <Icon name="send" size={20} />
+                            <button type="submit" disabled={!inputText.trim() || !!isLoading} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white px-6 py-3 rounded-lg font-bold transition-all flex items-center justify-center gap-2 transform active:scale-95">
+                                ENVIAR <Icon name="send" size={16} />
                             </button>
                         </form>
                     </div>
@@ -783,7 +665,7 @@
             );
         };
 
-        const InventoryTab = ({ inventory, attributes, updateInventory, apiKey }) => {
+        const InventoryTab = ({ inventory, attributes, updateInventory, apiKey, aiModel }) => {
             const [selectedDoc, setSelectedDoc] = useState(null);
             const [isAnalyzing, setIsAnalyzing] = useState(false);
             const totalItems = inventory.items.length;
@@ -792,10 +674,10 @@
             const handleAnalyzeItem = async () => {
                 if (!apiKey) return alert("API Key necessária.");
                 setIsAnalyzing(true);
-                const sysPrompt = `Você é um sábio narrador. Crie um parágrafo fascinante de lore, lenda ou propriedade mágica secreta sobre este item. Retorne JSON: {"lore": "texto gerado aqui"}`;
+                const sysPrompt = `Você é um sábio narrador. Crie um parágrafo de lore oculto sobre este item. Retorne JSON puro sem markdown: {"lore": "texto gerado aqui"}`;
                 const promptText = `Item: ${selectedDoc.name}. Descrição Base: ${selectedDoc.desc}`;
                 try {
-                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
+                    const res = await callGemini(apiKey, aiModel, promptText, sysPrompt, true);
                     if (res && res.lore) {
                         const newItems = inventory.items.map(item => 
                             item.name === selectedDoc.name ? { ...item, lore: res.lore } : item
@@ -804,8 +686,7 @@
                         setSelectedDoc({ ...selectedDoc, lore: res.lore });
                     }
                 } catch (e) { 
-                    console.error(e);
-                    alert("Aviso: Falha ao inspecionar o item. Verifique sua chave ou tente novamente.");
+                    alert("Aviso: Falha ao inspecionar o item.");
                 }
                 setIsAnalyzing(false);
             };
@@ -813,30 +694,32 @@
             return (
                 <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar relative">
                     <div className="max-w-5xl mx-auto space-y-6">
-                        <div className="flex justify-between items-center bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                        <div className="flex justify-between items-center bg-slate-800/80 p-5 rounded-2xl border border-slate-700 shadow-md">
                             <div>
-                                <h2 className="text-xl font-bold flex items-center gap-2"><Icon name="backpack" /> Mochila</h2>
-                                <p className="text-sm text-slate-400">Limite baseado na Força: {attributes?.forca || 0}</p>
+                                <h2 className="text-xl font-bold flex items-center gap-2 text-slate-200"><Icon name="backpack" className="text-amber-500" /> Mochila / Carga</h2>
+                                <p className="text-sm text-slate-400 mt-1">Sua capacidade máxima é determinada pela Força ({attributes?.forca || 0}).</p>
                             </div>
-                            <div className="text-right">
+                            <div className="text-right bg-slate-900 px-4 py-2 rounded-lg border border-slate-800">
                                 <span className={`text-2xl font-black ${overload ? 'text-red-500' : 'text-emerald-400'}`}>{totalItems}</span>
-                                <span className="text-slate-500"> / {inventory.capacity} slots</span>
+                                <span className="text-slate-500 font-bold"> / {inventory.capacity}</span>
                             </div>
                         </div>
 
                         {inventory.items.length === 0 ? (
-                            <div className="text-center p-12 text-slate-500 border-2 border-dashed border-slate-700 rounded-xl">Mochila vazia.</div>
+                            <div className="text-center p-16 text-slate-500 border-2 border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center gap-4">
+                                <Icon name="package-open" size={48} className="opacity-50" />
+                                <p>Você não carrega nada no momento.</p>
+                            </div>
                         ) : (
-                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                                 {inventory.items.map((item, idx) => (
-                                    <div key={idx} className="bg-slate-800 border border-slate-700 hover:border-blue-500 transition-colors rounded-xl p-4 flex flex-col relative group cursor-pointer" onClick={() => setSelectedDoc(item)}>
-                                        <div className="flex justify-between items-start mb-2">
-                                            <h3 className="font-bold text-amber-200">{item.name}</h3>
-                                            <Icon name={item.type === 'arma' ? 'sword' : item.type === 'documento' ? 'file-text' : 'package'} size={18} className="text-slate-400" />
+                                    <div key={idx} className="bg-slate-800/50 border border-slate-700/80 hover:border-blue-500/50 hover:bg-slate-800 transition-all rounded-2xl p-5 flex flex-col relative group cursor-pointer shadow-sm" onClick={() => setSelectedDoc(item)}>
+                                        <div className="flex justify-between items-start mb-3">
+                                            <h3 className="font-bold text-amber-300 text-lg leading-tight">{item.name}</h3>
+                                            <Icon name={item.type === 'arma' ? 'sword' : item.type === 'documento' ? 'file-text' : 'package'} size={20} className="text-slate-500 shrink-0" />
                                         </div>
-                                        <p className="text-sm text-slate-400 flex-1">{item.desc}</p>
-                                        {item.damage && <div className="mt-3 text-xs bg-red-900/30 text-red-300 px-2 py-1 rounded inline-block w-max self-start border border-red-800/50">Dano: {item.damage}</div>}
-                                        <div className="mt-2 text-xs text-blue-400 flex items-center gap-1"><Icon name="search" size={12}/> Clique para inspecionar</div>
+                                        <p className="text-sm text-slate-400 flex-1 leading-relaxed">{item.desc}</p>
+                                        {item.damage && <div className="mt-4 text-xs font-bold bg-red-950/40 text-red-400 px-3 py-1.5 rounded-lg inline-block w-max self-start border border-red-900/50">Dano da Arma: {item.damage}</div>}
                                     </div>
                                 ))}
                             </div>
@@ -844,34 +727,35 @@
                     </div>
 
                     {selectedDoc && (
-                        <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-                            <div className="bg-slate-800 border border-slate-600 text-slate-100 p-8 rounded-xl shadow-2xl max-w-lg w-full relative">
-                                <button onClick={()=>setSelectedDoc(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white"><Icon name="x" /></button>
-                                <h3 className="text-2xl font-bold mb-4 border-b border-slate-700 pb-2 flex items-center gap-2">
-                                    <Icon name={selectedDoc.type === 'arma' ? 'sword' : selectedDoc.type === 'documento' ? 'file-text' : 'package'} className="text-amber-400"/> {selectedDoc.name}
+                        <div className="absolute inset-0 bg-slate-950/90 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+                            <div className="bg-slate-900 border border-slate-700 text-slate-100 p-8 rounded-2xl shadow-2xl max-w-lg w-full relative">
+                                <button onClick={()=>setSelectedDoc(null)} className="absolute top-4 right-4 text-slate-500 hover:text-white transition-colors"><Icon name="x" /></button>
+                                <h3 className="text-2xl font-bold mb-4 pb-4 border-b border-slate-800 flex items-center gap-3">
+                                    <Icon name={selectedDoc.type === 'arma' ? 'sword' : selectedDoc.type === 'documento' ? 'file-text' : 'package'} className="text-amber-400"/> 
+                                    {selectedDoc.name}
                                 </h3>
                                 
                                 <div className="space-y-4">
                                     {selectedDoc.type === 'documento' && (
-                                        <div className="bg-[#fdf6e3] text-slate-900 p-4 rounded font-serif text-sm">
-                                            <p className="whitespace-pre-wrap">{selectedDoc.content || selectedDoc.desc || "O texto está ilegível."}</p>
+                                        <div className="bg-slate-100 text-slate-900 p-5 rounded-lg font-serif text-sm border-l-4 border-amber-600 shadow-inner">
+                                            <p className="whitespace-pre-wrap leading-relaxed">{selectedDoc.content || selectedDoc.desc || "O texto está ilegível."}</p>
                                         </div>
                                     )}
                                     {selectedDoc.type !== 'documento' && (
-                                        <p className="text-slate-300">{selectedDoc.desc}</p>
+                                        <p className="text-slate-300 leading-relaxed">{selectedDoc.desc}</p>
                                     )}
                                     
-                                    {selectedDoc.damage && <div className="text-sm font-bold text-red-400">Dano da Arma: {selectedDoc.damage}</div>}
+                                    {selectedDoc.damage && <div className="text-sm font-bold text-red-400 p-3 bg-red-950/30 rounded-lg border border-red-900/30">Poder de Dano: {selectedDoc.damage}</div>}
                                     
                                     {selectedDoc.lore ? (
-                                        <div className="bg-purple-900/20 border border-purple-800/40 p-4 rounded-lg mt-4">
-                                            <h4 className="text-purple-300 text-xs uppercase font-bold mb-2 flex items-center gap-1"><Icon name="sparkles" size={14}/> Conhecimento Oculto</h4>
-                                            <p className="text-sm text-purple-100 italic">{selectedDoc.lore}</p>
+                                        <div className="bg-purple-950/30 border border-purple-800/40 p-5 rounded-xl mt-6">
+                                            <h4 className="text-purple-400 text-xs uppercase font-black tracking-wider mb-2 flex items-center gap-2"><Icon name="book-open" size={14}/> Lore Descoberto</h4>
+                                            <p className="text-sm text-purple-200 italic leading-relaxed">{selectedDoc.lore}</p>
                                         </div>
                                     ) : (
-                                        <button onClick={handleAnalyzeItem} disabled={isAnalyzing} className="w-full mt-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-colors">
-                                            {isAnalyzing ? <Icon name="loader-2" className="animate-spin" size={16}/> : <Icon name="sparkles" size={16}/>}
-                                            {isAnalyzing ? 'Analisando Essência...' : '✨ Inspecionar Artefato'}
+                                        <button onClick={handleAnalyzeItem} disabled={isAnalyzing} className="w-full mt-6 py-3 bg-slate-800 hover:bg-purple-900/40 border border-slate-700 hover:border-purple-500/50 disabled:opacity-50 rounded-xl text-sm font-bold flex items-center justify-center gap-2 transition-all text-slate-300 hover:text-purple-300">
+                                            {isAnalyzing ? <Icon name="loader-2" className="animate-spin" size={18}/> : <Icon name="sparkles" size={18}/>}
+                                            {isAnalyzing ? 'Desvendando segredos...' : 'Inspecionar Segredos do Item'}
                                         </button>
                                     )}
                                 </div>
@@ -882,7 +766,7 @@
             );
         };
 
-        const RelationshipsTab = ({ rels, updateRel, apiKey }) => {
+        const RelationshipsTab = ({ rels, updateRel }) => {
             const [editingNpc, setEditingNpc] = useState(null);
 
             const handleImgUpload = (e, idx) => {
@@ -893,65 +777,57 @@
                 reader.readAsDataURL(file);
             };
 
-            const genNpcImage = async (idx, npc) => {
-                if (!apiKey) return alert("API Key necessária para gerar imagens.");
-                updateRel(idx, { isGeneratingImg: true });
-                const prompt = `Retrato de personagem de RPG: ${npc.name}. Aparelho: ${npc.appearance || 'aparência genérica'}. Estilo de arte conceitual de jogo, focado no rosto.`;
-                const img = await callGeminiImage(apiKey, prompt);
-                if (img) {
-                    updateRel(idx, { avatar: img, isGeneratingImg: false });
-                } else {
-                    updateRel(idx, { isGeneratingImg: false });
-                    alert("Aviso: Não foi possível gerar a imagem no GitHub. Verifique as configurações de faturamento da sua API Key.");
-                }
-            };
-
             return (
                 <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar">
                     <div className="max-w-5xl mx-auto space-y-4">
                         {rels.length === 0 ? (
-                            <div className="text-center p-12 text-slate-500 border-2 border-dashed border-slate-700 rounded-xl">Você ainda não conhece ninguém importante.</div>
+                            <div className="text-center p-16 text-slate-500 border-2 border-dashed border-slate-700 rounded-2xl flex flex-col items-center gap-4">
+                                <Icon name="users" size={48} className="opacity-50" />
+                                <p>O livro da sua história ainda está vazio de contatos importantes.</p>
+                            </div>
                         ) : (
                             rels.map((npc, idx) => (
-                                <div key={idx} className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-col md:flex-row gap-6 items-start">
+                                <div key={idx} className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-5 flex flex-col md:flex-row gap-6 items-start shadow-sm hover:border-slate-600 transition-colors">
                                     
-                                    <div className="w-24 h-24 md:w-32 md:h-32 shrink-0 bg-slate-900 rounded-lg overflow-hidden relative border border-slate-600 group">
-                                        {npc.isGeneratingImg ? (
-                                            <div className="w-full h-full flex items-center justify-center"><Icon name="loader-2" className="animate-spin text-blue-500" /></div>
-                                        ) : npc.avatar ? (
+                                    <div className="w-24 h-24 md:w-32 md:h-32 shrink-0 bg-slate-900 rounded-xl overflow-hidden relative border border-slate-700 group shadow-inner">
+                                        {npc.avatar ? (
                                             <img src={npc.avatar} className="w-full h-full object-cover" />
                                         ) : (
                                             <div className="w-full h-full flex flex-col items-center justify-center text-slate-600">
-                                                <Icon name="user" size={32} />
+                                                <Icon name="user" size={40} />
                                             </div>
                                         )}
-                                        <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                            <label className="text-[10px] bg-blue-600 px-2 py-1 rounded cursor-pointer hover:bg-blue-500">Upar Imagem<input type="file" hidden accept="image/*" onChange={(e)=>handleImgUpload(e, idx)} /></label>
-                                            <button onClick={()=>genNpcImage(idx, npc)} className="text-[10px] bg-purple-600 px-2 py-1 rounded hover:bg-purple-500">Gerar IA</button>
+                                        <div className="absolute inset-0 bg-slate-900/80 flex flex-col items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-sm">
+                                            <label className="text-[11px] bg-slate-700 text-white px-3 py-2 rounded-lg cursor-pointer hover:bg-slate-600 font-bold tracking-wide">
+                                                ADICIONAR FOTO
+                                                <input type="file" hidden accept="image/*" onChange={(e)=>handleImgUpload(e, idx)} />
+                                            </label>
                                         </div>
                                     </div>
 
-                                    <div className="flex-1 w-full space-y-3">
+                                    <div className="flex-1 w-full space-y-4">
                                         <div className="flex justify-between items-start">
                                             <div>
-                                                <h3 className="text-xl font-bold text-blue-300">{npc.name}</h3>
-                                                <p className="text-sm text-slate-400 capitalize">{npc.status}</p>
+                                                <h3 className="text-2xl font-bold text-slate-100">{npc.name}</h3>
+                                                <p className="text-sm text-amber-500 font-semibold uppercase tracking-wider mt-1">{npc.status}</p>
                                             </div>
-                                            <button onClick={()=>setEditingNpc({idx, ...npc})} className="text-slate-400 hover:text-white p-2"><Icon name="edit" size={16}/></button>
+                                            <button onClick={()=>setEditingNpc({idx, ...npc})} className="text-slate-500 hover:text-blue-400 p-2 bg-slate-900 rounded-lg border border-slate-800 transition-colors"><Icon name="edit" size={16}/></button>
                                         </div>
 
-                                        <div className="space-y-1">
-                                            <div className="flex justify-between text-xs font-semibold text-slate-300">
-                                                <span>Afinidade</span>
+                                        <div className="space-y-1 bg-slate-900/50 p-3 rounded-lg border border-slate-800/50">
+                                            <div className="flex justify-between text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
+                                                <span>Afinidade / Relacionamento</span>
                                                 <span>{npc.affinity}%</span>
                                             </div>
-                                            <div className="w-full bg-slate-900 rounded-full h-2">
-                                                <div className={`h-full rounded-full ${npc.affinity > 70 ? 'bg-emerald-500' : npc.affinity < 30 ? 'bg-red-500' : 'bg-yellow-500'}`} style={{width: `${Math.max(0, Math.min(100, npc.affinity))}%`}}></div>
+                                            <div className="w-full bg-slate-800 rounded-full h-2.5 overflow-hidden">
+                                                <div className={`h-full rounded-full transition-all ${npc.affinity > 70 ? 'bg-emerald-500' : npc.affinity < 30 ? 'bg-red-500' : 'bg-blue-500'}`} style={{width: `${Math.max(0, Math.min(100, npc.affinity))}%`}}></div>
                                             </div>
                                         </div>
 
-                                        <p className="text-sm text-slate-300 italic">"{npc.personality || 'Desconhecida'}"</p>
-                                        <p className="text-sm text-slate-400 line-clamp-2">{npc.backstory || 'Sem histórico conhecido.'}</p>
+                                        <div className="text-sm text-slate-400 leading-relaxed space-y-2">
+                                            <p className="italic text-slate-300 border-l-2 border-slate-600 pl-3">Personalidade: {npc.personality || 'Desconhecida'}</p>
+                                            <p className="line-clamp-2">{npc.backstory || 'Sem registros no diário sobre o passado deste NPC.'}</p>
+                                        </div>
                                     </div>
                                 </div>
                             ))
@@ -959,27 +835,29 @@
                     </div>
 
                     {editingNpc && (
-                        <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-                            <div className="bg-slate-800 p-6 rounded-xl border border-slate-600 max-w-lg w-full space-y-4">
-                                <h3 className="font-bold text-lg">Editar Notas sobre {editingNpc.name}</h3>
-                                <p className="text-xs text-slate-400 mb-2">A IA usa essas notas para guiar as ações e falas deste personagem.</p>
+                        <div className="absolute inset-0 bg-slate-950/90 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+                            <div className="bg-slate-900 p-8 rounded-2xl border border-slate-700 max-w-lg w-full space-y-5 shadow-2xl">
+                                <div>
+                                    <h3 className="font-bold text-xl text-slate-100">Ficha do Personagem: {editingNpc.name}</h3>
+                                    <p className="text-xs text-slate-400 mt-1">A IA consultará essas anotações secretas para interpretar este NPC futuramente.</p>
+                                </div>
                                 
-                                <div className="space-y-2">
-                                    <label className="text-xs font-bold text-slate-400">Aparência</label>
-                                    <textarea className="w-full bg-slate-900 p-2 rounded text-sm" rows="2" value={editingNpc.appearance || ''} onChange={(e)=>setEditingNpc({...editingNpc, appearance: e.target.value})}></textarea>
+                                <div className="space-y-1">
+                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Aparência Física</label>
+                                    <textarea className="w-full bg-slate-950 border border-slate-800 p-3 rounded-lg text-sm text-slate-200 outline-none focus:border-blue-500" rows="2" value={editingNpc.appearance || ''} onChange={(e)=>setEditingNpc({...editingNpc, appearance: e.target.value})}></textarea>
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-xs font-bold text-slate-400">Personalidade</label>
-                                    <input className="w-full bg-slate-900 p-2 rounded text-sm" value={editingNpc.personality || ''} onChange={(e)=>setEditingNpc({...editingNpc, personality: e.target.value})} />
+                                <div className="space-y-1">
+                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Traços de Personalidade</label>
+                                    <input className="w-full bg-slate-950 border border-slate-800 p-3 rounded-lg text-sm text-slate-200 outline-none focus:border-blue-500" value={editingNpc.personality || ''} onChange={(e)=>setEditingNpc({...editingNpc, personality: e.target.value})} />
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-xs font-bold text-slate-400">História Compartilhada / Segredos</label>
-                                    <textarea className="w-full bg-slate-900 p-2 rounded text-sm" rows="3" value={editingNpc.backstory || ''} onChange={(e)=>setEditingNpc({...editingNpc, backstory: e.target.value})}></textarea>
+                                <div className="space-y-1">
+                                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Segredos e Passado</label>
+                                    <textarea className="w-full bg-slate-950 border border-slate-800 p-3 rounded-lg text-sm text-slate-200 outline-none focus:border-blue-500" rows="4" value={editingNpc.backstory || ''} onChange={(e)=>setEditingNpc({...editingNpc, backstory: e.target.value})}></textarea>
                                 </div>
 
-                                <div className="flex justify-end gap-2 pt-4">
-                                    <button onClick={()=>setEditingNpc(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-white">Cancelar</button>
-                                    <button onClick={()=>{ updateRel(editingNpc.idx, { appearance: editingNpc.appearance, personality: editingNpc.personality, backstory: editingNpc.backstory }); setEditingNpc(null); }} className="px-4 py-2 text-sm bg-blue-600 rounded hover:bg-blue-500">Salvar Mudanças</button>
+                                <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+                                    <button onClick={()=>setEditingNpc(null)} className="px-5 py-2 text-sm font-bold text-slate-400 hover:text-slate-200 transition-colors">Cancelar</button>
+                                    <button onClick={()=>{ updateRel(editingNpc.idx, { appearance: editingNpc.appearance, personality: editingNpc.personality, backstory: editingNpc.backstory }); setEditingNpc(null); }} className="px-6 py-2 text-sm font-bold bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors shadow-lg">Salvar Modificações</button>
                                 </div>
                             </div>
                         </div>
@@ -1001,20 +879,33 @@
             return (
                 <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar">
                     <div className="max-w-3xl mx-auto space-y-6">
-                        <div className="bg-blue-900/30 border border-blue-800/50 p-4 rounded-xl text-sm text-blue-200">
-                            A Inteligência Artificial definirá o "Clima" (Mood) da cena atual e trocará a música automaticamente se houver uma trilha correspondente na categoria.
-                            <br/><br/><strong>Clima Atual:</strong> <span className="uppercase font-bold text-white bg-blue-600 px-2 py-1 rounded text-xs">{currentMood}</span>
+                        <div className="bg-slate-800/80 border border-slate-700 p-6 rounded-2xl flex flex-col md:flex-row items-center gap-6 shadow-sm">
+                            <div className="w-16 h-16 bg-blue-900/50 text-blue-400 rounded-full flex items-center justify-center shrink-0 border border-blue-700/50">
+                                <Icon name="music" size={32} />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-200 mb-2">Trilha Sonora Dinâmica</h3>
+                                <p className="text-sm text-slate-400 leading-relaxed">
+                                    A IA do Mestre analisa o tom da cena e decide a vibe atual. O sistema trocará automaticamente para a música que você anexar nos slots abaixo.
+                                </p>
+                                <div className="mt-3">
+                                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wider mr-2">Cena Atual:</span>
+                                    <span className="uppercase font-black text-amber-400 bg-amber-950/40 border border-amber-900/50 px-3 py-1 rounded-lg text-xs tracking-widest">{currentMood}</span>
+                                </div>
+                            </div>
                         </div>
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             {categories.map(cat => (
-                                <div key={cat} className={`p-4 rounded-xl border ${currentMood === cat ? 'bg-slate-700 border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'bg-slate-800 border-slate-700'} flex items-center justify-between`}>
+                                <div key={cat} className={`p-5 rounded-2xl border transition-all ${currentMood === cat ? 'bg-slate-800/90 border-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.15)] scale-[1.02]' : 'bg-slate-900/50 border-slate-800'} flex items-center justify-between`}>
                                     <div>
-                                        <h4 className="font-bold capitalize text-slate-200">{cat.replace('_', ' ')}</h4>
-                                        <p className="text-xs text-slate-500 mt-1">{audioTracks[cat] ? 'Música Carregada' : 'Nenhuma música'}</p>
+                                        <h4 className="font-bold text-slate-200 uppercase text-xs tracking-wider mb-1">{cat.replace('_', ' ')}</h4>
+                                        <p className="text-xs font-medium text-slate-500 flex items-center gap-1">
+                                            {audioTracks[cat] ? <span className="text-emerald-500 flex items-center gap-1"><Icon name="check-circle-2" size={12}/> Faixa Inserida</span> : 'Vazio (Padrão do Navegador)'}
+                                        </p>
                                     </div>
-                                    <label className="cursor-pointer bg-slate-700 hover:bg-slate-600 p-2 rounded-full transition-colors text-slate-300">
-                                        <Icon name={audioTracks[cat] ? 'music-4' : 'upload'} size={18} />
+                                    <label className={`cursor-pointer p-3 rounded-xl transition-colors ${audioTracks[cat] ? 'bg-emerald-900/30 text-emerald-400 hover:bg-emerald-800/50' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}>
+                                        <Icon name={audioTracks[cat] ? 'disc' : 'upload'} size={20} />
                                         <input type="file" hidden accept="audio/*" onChange={(e) => handleAudioUpload(e, cat)} />
                                     </label>
                                 </div>
@@ -1025,44 +916,77 @@
             );
         };
 
-        const SystemTab = ({ player, exportSave, importSave }) => (
+        const SystemTab = ({ player, exportSave, importSave, aiModel }) => (
             <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar">
-                <div className="max-w-3xl mx-auto space-y-8">
+                <div className="max-w-4xl mx-auto space-y-8">
                     
-                    <div className="bg-slate-800 border border-slate-700 rounded-xl p-6">
-                        <h3 className="text-xl font-bold border-b border-slate-700 pb-2 mb-4">Ficha do Personagem</h3>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    <div className="bg-slate-800/80 border border-slate-700 rounded-2xl p-6 md:p-8 shadow-sm">
+                        <div className="flex items-center gap-3 border-b border-slate-700 pb-4 mb-6">
+                            <Icon name="swords" className="text-blue-500"/>
+                            <h3 className="text-xl font-bold text-slate-100">Ficha do Personagem</h3>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
                             {Object.entries(player.attributes || {}).map(([attr, val]) => (
-                                <div key={attr} className="bg-slate-900 p-3 rounded text-center border border-slate-800">
-                                    <span className="block text-xs text-slate-500 uppercase font-bold">{attr}</span>
-                                    <span className="block text-2xl font-black text-blue-400">{val}</span>
+                                <div key={attr} className="bg-slate-900 p-4 rounded-xl text-center border border-slate-800 shadow-inner">
+                                    <span className="block text-[10px] text-slate-500 uppercase font-black tracking-widest mb-1">{attr}</span>
+                                    <span className="block text-3xl font-black text-blue-400">{val}</span>
                                 </div>
                             ))}
                         </div>
+                        
                         <div>
-                            <h4 className="text-sm font-bold text-slate-400 mb-2">Habilidades</h4>
-                            <div className="flex flex-wrap gap-2">
-                                {(player.skills || []).map((sk, i) => (
-                                    <span key={i} className="bg-purple-900/40 border border-purple-800/50 text-purple-300 px-3 py-1 rounded-full text-sm">{sk}</span>
-                                ))}
+                            <h4 className="text-xs font-black text-slate-500 uppercase tracking-widest mb-3">Habilidades e Vantagens</h4>
+                            {(!player.skills || player.skills.length === 0) ? (
+                                <p className="text-sm text-slate-500 italic">Nenhuma habilidade especial registrada.</p>
+                            ) : (
+                                <div className="flex flex-wrap gap-2">
+                                    {player.skills.map((sk, i) => (
+                                        <span key={i} className="bg-purple-900/30 border border-purple-800/50 text-purple-300 font-medium px-4 py-2 rounded-lg text-sm shadow-sm">{sk}</span>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="bg-slate-800/80 border border-slate-700 rounded-2xl p-6 shadow-sm">
+                            <div className="flex items-center gap-3 border-b border-slate-700 pb-4 mb-4">
+                                <Icon name="cpu" className="text-amber-500"/>
+                                <h3 className="text-lg font-bold text-slate-100">Motor do Jogo</h3>
+                            </div>
+                            <p className="text-sm text-slate-400 mb-2">A inteligência por trás do Mestre nesta campanha atual é:</p>
+                            <div className="bg-slate-900 border border-slate-800 p-3 rounded-lg text-sm font-mono text-amber-400 text-center mb-4">
+                                {aiModel}
+                            </div>
+                            <p className="text-xs text-slate-500 leading-relaxed">Nota: Para alterar o modelo, você precisa salvar seu jogo, ir para o Menu Principal e iniciar/carregar com um novo modelo selecionado nas configurações.</p>
+                        </div>
+
+                        <div className="bg-slate-800/80 border border-slate-700 rounded-2xl p-6 shadow-sm">
+                            <div className="flex items-center gap-3 border-b border-slate-700 pb-4 mb-4">
+                                <Icon name="save" className="text-emerald-500"/>
+                                <h3 className="text-lg font-bold text-slate-100">Gerenciador de Saves</h3>
+                            </div>
+                            <p className="text-sm text-slate-400 mb-6 leading-relaxed">
+                                Seu progresso é salvo no navegador a cada turno. Exporte um arquivo local para fazer backup externo.
+                            </p>
+                            
+                            <div className="flex flex-col gap-3">
+                                <button onClick={exportSave} className="w-full py-3 bg-slate-700 hover:bg-slate-600 rounded-xl font-bold flex items-center justify-center gap-2 transition-colors text-slate-200 border border-slate-600">
+                                    <Icon name="download" size={18}/> Fazer Backup (Exportar)
+                                </button>
+                                <label className="w-full py-3 bg-slate-900 hover:bg-slate-800 rounded-xl font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors text-slate-300 border border-slate-800">
+                                    <Icon name="upload" size={18}/> Restaurar Save (Importar)
+                                    <input type="file" hidden accept=".json" onChange={importSave} />
+                                </label>
                             </div>
                         </div>
                     </div>
 
-                    <div className="bg-slate-800 border border-slate-700 rounded-xl p-6">
-                        <h3 className="text-xl font-bold border-b border-slate-700 pb-2 mb-4">Dados do Jogo</h3>
-                        <p className="text-sm text-slate-400 mb-4">Seu jogo é salvo automaticamente localmente (IndexedDB) a cada turno para suportar imagens e prevenir perda de dados. Você também pode exportar um arquivo físico.</p>
-                        
-                        <div className="flex flex-col md:flex-row gap-4">
-                            <button onClick={exportSave} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 rounded font-semibold flex items-center justify-center gap-2 transition-colors"><Icon name="download" size={18}/> Exportar Save (.json)</button>
-                            <label className="flex-1 py-3 bg-slate-700 hover:bg-slate-600 rounded font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors">
-                                <Icon name="upload" size={18}/> Importar Save
-                                <input type="file" hidden accept=".json" onChange={importSave} />
-                            </label>
-                        </div>
-                        <div className="mt-4 pt-4 border-t border-slate-700">
-                            <button onClick={() => { if(confirm("Certeza? Todo o progresso não salvo será perdido.")) window.location.reload(); }} className="w-full py-3 bg-red-900/50 hover:bg-red-800/50 text-red-400 rounded font-semibold border border-red-900 transition-colors">Sair para o Menu Principal</button>
-                        </div>
+                    <div className="pt-8">
+                        <button onClick={() => { if(confirm("Atenção: Salve seu jogo antes de sair. Deseja voltar ao Menu Principal?")) window.location.reload(); }} className="w-full py-4 bg-red-950/40 hover:bg-red-900/60 text-red-400 rounded-xl font-black tracking-wider uppercase border border-red-900/50 transition-colors shadow-sm">
+                            Encerrar Sessão e Sair
+                        </button>
                     </div>
 
                 </div>
