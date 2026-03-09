@@ -24,7 +24,7 @@
             background-color: #050505;
             background-image: radial-gradient(circle at 50% 50%, #1e1b4b 0%, #000000 100%);
             color: #e2e8f0;
-            overflow: hidden; /* Prevent body scroll, handle inside panels */
+            overflow: hidden;
         }
 
         .hud-panel {
@@ -39,16 +39,13 @@
             font-family: 'Space Mono', monospace;
         }
 
-        /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
         ::-webkit-scrollbar-thumb { background: var(--ui-accent); border-radius: 3px; }
 
-        /* Status Bars */
         .status-bar-bg { background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); }
         .bar-fill { transition: width 0.3s ease; }
 
-        /* CRT Scanline effect overlay */
         .scanlines {
             position: fixed;
             top: 0; left: 0; width: 100vw; height: 100vh;
@@ -71,21 +68,40 @@
 <body class="h-screen w-screen flex flex-col text-sm md:text-base">
     <div class="scanlines"></div>
 
-    <!-- SCREENS -->
     <!-- 1. Setup / Main Menu -->
-    <div id="screen-setup" class="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md">
-        <div class="hud-panel p-8 max-w-lg w-full flex flex-col gap-6">
+    <div id="screen-setup" class="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md overflow-y-auto p-4">
+        <div class="hud-panel p-6 md:p-8 max-w-2xl w-full flex flex-col gap-6 my-auto">
             <h1 class="text-4xl font-bold text-center text-sky-400 tracking-widest uppercase">Nexus RPG</h1>
             
-            <div class="flex flex-col gap-2">
-                <label class="text-sky-300">Chave da API (Gemini):</label>
-                <input type="password" id="api-key-input" class="bg-black/50 border border-sky-900 rounded p-2 text-white focus:outline-none focus:border-sky-400" placeholder="AIzaSy...">
-                <p class="text-xs text-gray-400">Necessária para rodar o mestre de jogo. Obtenha no Google AI Studio.</p>
+            <div class="flex flex-col md:flex-row gap-4">
+                <div class="flex-1 flex flex-col gap-2">
+                    <label class="text-sky-300 font-bold">Provedor de IA:</label>
+                    <select id="api-provider" class="bg-black/50 border border-sky-900 rounded p-3 text-white focus:outline-none focus:border-sky-400">
+                        <option value="gemini">Google Gemini (Recomendado)</option>
+                        <option value="groq">Groq (Llama 3 - Ultra Rápido)</option>
+                        <option value="openrouter">OpenRouter (Modelos Gratuitos)</option>
+                    </select>
+                </div>
+                <div class="flex-[2] flex flex-col gap-2">
+                    <label class="text-sky-300 font-bold">Chave da API:</label>
+                    <input type="password" id="api-key-input" class="bg-black/50 border border-sky-900 rounded p-3 text-white focus:outline-none focus:border-sky-400" placeholder="Insira sua chave aqui...">
+                </div>
             </div>
 
-            <div class="flex gap-4">
-                <button onclick="startGameSetup()" class="flex-1 bg-sky-600 hover:bg-sky-500 text-white py-3 rounded font-bold transition-colors">NOVA CAMPANHA</button>
-                <button onclick="document.getElementById('import-save').click()" class="flex-1 border border-sky-600 hover:bg-sky-900 text-sky-400 py-3 rounded font-bold transition-colors">CARREGAR SAVE</button>
+            <!-- Dicas de APIs -->
+            <div class="bg-sky-950/30 border border-sky-900 rounded p-4 text-sm text-sky-200">
+                <h4 class="font-bold text-sky-400 mb-2"><i class="fas fa-info-circle mr-2"></i>Dicas de APIs Gratuitas</h4>
+                <ul class="list-disc list-inside space-y-1">
+                    <li><strong class="text-white">Gemini:</strong> O mais estável para narrativas complexas. Obtenha grátis no <a href="[https://aistudio.google.com/](https://aistudio.google.com/)" target="_blank" class="text-sky-400 underline">Google AI Studio</a>.</li>
+                    <li><strong class="text-white">Groq:</strong> Focado em velocidade extrema. Oferece o Llama 3 gratuitamente em <a href="[https://console.groq.com/](https://console.groq.com/)" target="_blank" class="text-sky-400 underline">console.groq.com</a>.</li>
+                    <li><strong class="text-white">OpenRouter:</strong> Um agregador que oferece opções "free" de vários modelos. Pegue sua chave em <a href="[https://openrouter.ai/](https://openrouter.ai/)" target="_blank" class="text-sky-400 underline">openrouter.ai</a>.</li>
+                </ul>
+                <p class="mt-2 text-xs text-sky-400/80 italic">*Nota: O sistema do jogo requer que a IA responda em formato JSON estruturado. O Gemini é o que erra menos essa estrutura.</p>
+            </div>
+
+            <div class="flex flex-col md:flex-row gap-4 mt-2">
+                <button onclick="startGameSetup()" class="flex-1 bg-sky-600 hover:bg-sky-500 text-white py-4 rounded font-bold transition-colors shadow-[0_0_15px_rgba(56,189,248,0.3)]">NOVA CAMPANHA</button>
+                <button onclick="document.getElementById('import-save').click()" class="flex-1 border border-sky-600 hover:bg-sky-900 text-sky-400 py-4 rounded font-bold transition-colors">CARREGAR SAVE</button>
                 <input type="file" id="import-save" class="hidden" accept=".json" onchange="importSave(event)">
             </div>
         </div>
@@ -264,7 +280,10 @@
 
     <script>
         // --- 1. STATE MANAGEMENT ---
-        let apiKey = '';
+        let apiConfig = {
+            provider: 'gemini',
+            key: ''
+        };
         let campaignMode = 'original';
         let currentTab = 'inventory';
         let isProcessing = false;
@@ -273,20 +292,18 @@
             player: {
                 name: '', race: '', class: '', background: '', imgBase64: null,
                 stats: { hp: 100, maxHp: 100, sanity: 100, maxSanity: 100, stamina: 50, maxStamina: 50, exp: 0 },
-                attributes: {}, // Generated by AI
+                attributes: {}, 
                 skills: []
             },
             campaign: { genre: '', universe: '', npcs: '' },
             context: { location: 'Ponto de Partida', party: [] },
             inventory: { maxWeight: 50, items: [] },
             relationships: [],
-            history: [], // Text log for display
-            systemLog: [], // Condensed history for the AI prompt
+            history: [], 
+            systemLog: [], 
         };
 
-        let audioTracks = {
-            calm: null, combat: null, boss: null, tension: null, investigation: null
-        };
+        let audioTracks = { calm: null, combat: null, boss: null, tension: null, investigation: null };
         let currentMood = 'calm';
 
         // --- 2. INITIALIZATION & SETUP ---
@@ -300,8 +317,11 @@
         }
 
         function startGameSetup() {
-            apiKey = document.getElementById('api-key-input').value.trim();
-            if (!apiKey) { alert("Por favor, insira a chave da API do Gemini."); return; }
+            apiConfig.key = document.getElementById('api-key-input').value.trim();
+            apiConfig.provider = document.getElementById('api-provider').value;
+            
+            if (!apiConfig.key) { alert("Por favor, insira a chave da API para continuar."); return; }
+            
             document.getElementById('screen-setup').classList.add('hidden');
             document.getElementById('screen-campaign').classList.remove('hidden');
             setCampaignMode('original');
@@ -312,11 +332,7 @@
             if (!file) return null;
             return new Promise((resolve) => {
                 const reader = new FileReader();
-                reader.onload = (e) => {
-                    // Basic compression via canvas could go here to save localStorage space.
-                    // For simplicity, returning the raw base64. Keep images small!
-                    resolve(e.target.result); 
-                };
+                reader.onload = (e) => resolve(e.target.result);
                 reader.readAsDataURL(file);
             });
         }
@@ -326,7 +342,6 @@
             btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Gerando Personagem...';
             btn.disabled = true;
 
-            // Gather inputs
             gameState.campaign.genre = document.getElementById('camp-genre').value || 'Fantasia Genérica';
             if (campaignMode === 'custom') {
                 gameState.campaign.universe = document.getElementById('camp-universe').value;
@@ -339,32 +354,30 @@
             gameState.player.background = document.getElementById('char-bg').value;
             gameState.player.imgBase64 = await handleImageUpload('char-img-input');
 
-            // Call AI to generate initial stats, skills and starting items based on the input
             const initPrompt = `
                 Você é o motor de um RPG de mesa virtual. Crie os dados iniciais do personagem baseado nas seguintes informações:
                 Gênero: ${gameState.campaign.genre}
                 Nome: ${gameState.player.name}, Raça: ${gameState.player.race}, Classe: ${gameState.player.class}
                 História: ${gameState.player.background}
 
-                Retorne ESTRITAMENTE um objeto JSON válido com a seguinte estrutura:
+                Retorne ESTRITAMENTE um objeto JSON válido (sem blocos de código ou markdown) com a seguinte estrutura exata:
                 {
-                    "attributes": { "Força": numero (1-20), "Agilidade": numero, "Inteligência": numero, "Carisma": numero },
-                    "skills": ["Habilidade 1 com breve descrição", "Habilidade 2", "Habilidade 3"],
-                    "startingItems": [ {"name": "Arma base", "desc": "Dano 1d6", "weight": 2, "type": "weapon"}, {"name": "Item utilitário", "desc": "Efeito", "weight": 1, "type": "item"} ],
-                    "introNarrative": "Um parágrafo inicial épico introduzindo o personagem no mundo e dando a ele a primeira situação/lugar em que se encontra.",
+                    "attributes": { "Força": 10, "Agilidade": 10, "Inteligência": 10, "Carisma": 10 },
+                    "skills": ["Habilidade 1 com breve descrição", "Habilidade 2"],
+                    "startingItems": [ {"name": "Arma base", "desc": "Dano 1d6", "weight": 2, "type": "weapon"} ],
+                    "introNarrative": "Um parágrafo inicial épico introduzindo o personagem no mundo.",
                     "startingLocation": "Nome do local inicial"
                 }
             `;
 
             try {
-                const aiData = await callGemini(initPrompt, true);
+                const aiData = await callAIProvider(initPrompt, true);
                 
                 gameState.player.attributes = aiData.attributes;
                 gameState.player.skills = aiData.skills;
                 gameState.inventory.items = aiData.startingItems;
                 gameState.context.location = aiData.startingLocation;
 
-                // Move to Game Screen
                 document.getElementById('screen-campaign').classList.add('hidden');
                 document.getElementById('screen-game').classList.remove('hidden');
                 
@@ -375,7 +388,7 @@
 
             } catch (error) {
                 console.error(error);
-                alert("Erro ao gerar personagem. Verifique a chave da API e tente novamente.");
+                alert("Erro ao gerar personagem. Verifique sua chave da API, limites da conta ou tente escolher outro provedor.");
                 btn.innerHTML = 'GERAR STATUS E INICIAR';
                 btn.disabled = false;
             }
@@ -427,25 +440,22 @@
 
             if (currentTab === 'inventory') {
                 let currentWeight = gameState.inventory.items.reduce((sum, item) => sum + (item.weight || 0), 0);
-                
                 let html = `<div class="flex justify-between text-gray-400 mb-4 border-b border-gray-700 pb-2">
                                 <span>Capacidade:</span>
                                 <span class="${currentWeight > gameState.inventory.maxWeight ? 'text-red-400' : 'text-sky-400'}">${currentWeight} / ${gameState.inventory.maxWeight} kg</span>
-                            </div>
-                            <div class="flex flex-col gap-2">`;
+                            </div><div class="flex flex-col gap-2">`;
                 
                 if (gameState.inventory.items.length === 0) html += `<p class="text-gray-500 italic">Inventário vazio.</p>`;
                 
-                gameState.inventory.items.forEach((item, index) => {
+                gameState.inventory.items.forEach((item) => {
                     let icon = item.type === 'weapon' ? 'fa-khanda' : item.type === 'document' ? 'fa-scroll' : 'fa-box';
-                    html += `
-                        <div class="bg-black/40 border border-gray-700 p-2 rounded flex items-start gap-3 hover:border-sky-800 transition">
-                            <i class="fas ${icon} text-gray-400 mt-1"></i>
-                            <div class="flex-1">
-                                <h5 class="font-bold text-sky-300">${item.name} <span class="text-xs text-gray-500 font-normal">(${item.weight}kg)</span></h5>
-                                <p class="text-xs text-gray-400">${item.desc}</p>
-                            </div>
-                        </div>`;
+                    html += `<div class="bg-black/40 border border-gray-700 p-2 rounded flex items-start gap-3 hover:border-sky-800 transition">
+                                <i class="fas ${icon} text-gray-400 mt-1"></i>
+                                <div class="flex-1">
+                                    <h5 class="font-bold text-sky-300">${item.name} <span class="text-xs text-gray-500 font-normal">(${item.weight}kg)</span></h5>
+                                    <p class="text-xs text-gray-400">${item.desc}</p>
+                                </div>
+                            </div>`;
                 });
                 html += `</div>`;
                 container.innerHTML = html;
@@ -453,23 +463,21 @@
             } else if (currentTab === 'relationships') {
                 let html = `<button onclick="openNPCModal()" class="w-full bg-black/40 border border-dashed border-sky-800 text-sky-400 p-2 rounded mb-4 hover:bg-sky-900/30">+ Adicionar NPC Manualmente</button>
                             <div class="flex flex-col gap-3">`;
-                
                 if (gameState.relationships.length === 0) html += `<p class="text-gray-500 italic">Nenhum relacionamento notável ainda.</p>`;
 
                 gameState.relationships.forEach((npc, idx) => {
                     let statusColor = npc.affinity > 50 ? 'bg-green-500' : npc.affinity < -50 ? 'bg-red-500' : 'bg-gray-400';
-                    html += `
-                        <div class="bg-black/40 border border-gray-700 p-3 rounded flex items-center gap-3 cursor-pointer hover:border-sky-500" onclick="openNPCModal(${idx})">
-                            <div class="w-10 h-10 rounded-full bg-gray-800 flex-shrink-0 overflow-hidden border border-gray-600">
-                                ${npc.img ? `<img src="${npc.img}" class="w-full h-full object-cover">` : `<i class="fas fa-user text-gray-500 m-auto mt-2 block text-center"></i>`}
-                            </div>
-                            <div class="flex-1">
-                                <h5 class="font-bold text-white text-sm">${npc.name}</h5>
-                                <div class="w-full bg-gray-800 h-1 mt-1 rounded-full overflow-hidden">
-                                    <div class="${statusColor} h-full" style="width: ${Math.abs(npc.affinity)}%; margin-left: ${npc.affinity < 0 ? 0 : 50}%; margin-right: ${npc.affinity > 0 ? 0 : 50}%"></div>
+                    html += `<div class="bg-black/40 border border-gray-700 p-3 rounded flex items-center gap-3 cursor-pointer hover:border-sky-500" onclick="openNPCModal(${idx})">
+                                <div class="w-10 h-10 rounded-full bg-gray-800 flex-shrink-0 overflow-hidden border border-gray-600">
+                                    ${npc.img ? `<img src="${npc.img}" class="w-full h-full object-cover">` : `<i class="fas fa-user text-gray-500 m-auto mt-2 block text-center"></i>`}
                                 </div>
-                            </div>
-                        </div>`;
+                                <div class="flex-1">
+                                    <h5 class="font-bold text-white text-sm">${npc.name}</h5>
+                                    <div class="w-full bg-gray-800 h-1 mt-1 rounded-full overflow-hidden">
+                                        <div class="${statusColor} h-full" style="width: ${Math.abs(npc.affinity)}%; margin-left: ${npc.affinity < 0 ? 0 : 50}%; margin-right: ${npc.affinity > 0 ? 0 : 50}%"></div>
+                                    </div>
+                                </div>
+                            </div>`;
                 });
                 html += `</div>`;
                 container.innerHTML = html;
@@ -484,10 +492,9 @@
                                 <button onclick="exportSave()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-xs py-2 rounded">Exportar JSON</button>
                             </div>
                         </div>
-
                         <div class="border border-gray-700 p-3 rounded bg-black/40">
                             <h4 class="text-sky-400 font-bold mb-2"><i class="fas fa-music mr-2"></i>Trilha Sonora</h4>
-                            <p class="text-xs text-gray-400 mb-2">Faça upload de músicas para situações do jogo. A IA as acionará automaticamente.</p>
+                            <p class="text-xs text-gray-400 mb-2">Faça upload de músicas. A IA as acionará automaticamente.</p>
                             ${['calm', 'combat', 'tension', 'investigation'].map(mood => `
                                 <div class="flex justify-between items-center mb-1 bg-black/30 p-1 rounded">
                                     <span class="text-xs capitalize w-20 text-gray-300">${mood}</span>
@@ -495,7 +502,6 @@
                                 </div>
                             `).join('')}
                         </div>
-
                         <div class="border border-gray-700 p-3 rounded bg-black/40">
                             <h4 class="text-sky-400 font-bold mb-2"><i class="fas fa-book-open mr-2"></i>Atributos & Skills</h4>
                             <div class="grid grid-cols-2 gap-2 text-xs mb-2">
@@ -526,7 +532,6 @@
                         <p class="text-gray-200 text-sm md:text-base">${text}</p>
                     </div>`;
             } else {
-                // AI / System
                 entry.className = "flex justify-start mb-2";
                 entry.innerHTML = `
                     <div class="max-w-[95%] bg-black/50 border-l-2 border-sky-500 p-4 rounded shadow-lg text-gray-300 text-sm md:text-base leading-relaxed">
@@ -536,8 +541,6 @@
 
             log.appendChild(entry);
             document.getElementById('story-container').scrollTop = document.getElementById('story-container').scrollHeight;
-            
-            // Save to history (keep history small for display purposes if needed, but we keep all here)
             gameState.history.push({role, text, actionType});
         }
 
@@ -562,10 +565,7 @@
             document.getElementById('loading-indicator').classList.remove('hidden');
             isProcessing = true;
 
-            // Build Context for AI
             const recentHistory = gameState.history.slice(-6).map(h => `${h.role === 'player' ? `Jogador (${h.actionType})` : 'Mestre'}: ${h.text}`).join('\n');
-            
-            // Compress state for prompt
             const minifiedState = {
                 hp: gameState.player.stats.hp,
                 sanity: gameState.player.stats.sanity,
@@ -576,46 +576,40 @@
 
             const prompt = `
                 Você é o Mestre do Jogo (IA) de um RPG.
-                Contexto do Mundo: Gênero ${gameState.campaign.genre}. ${gameState.campaign.universe}
-                Estado Atual do Jogador: ${JSON.stringify(minifiedState)}
-                
-                Últimas interações:
+                Contexto: Gênero ${gameState.campaign.genre}. ${gameState.campaign.universe}
+                Jogador Atual: ${JSON.stringify(minifiedState)}
+                Histórico recente:
                 ${recentHistory}
                 
-                Instruções Estritas:
-                1. Analise a ação do jogador e continue a narrativa. Descreva as consequências.
-                2. Se houver combate ou dano, modifique o "hp_change".
-                3. Se houver medo/terror, modifique "sanity_change".
-                4. Se achar um item, adicione na lista de "new_items". Se perder, em "lost_items".
-                5. Atualize a "location" apenas se o jogador viajar.
-                6. Escolha um "mood" apropriado (calm, combat, tension, investigation) baseado na cena atual.
+                Instruções:
+                1. Avance a narrativa baseado na ação do jogador.
+                2. Se houver dano ou cura, ajuste "hp_change".
+                3. Se houver dano mental, ajuste "sanity_change".
+                4. Se achar item, ponha em "new_items". Se perder, "lost_items".
+                5. Atualize "location" se ele viajar.
+                6. "mood" deve ser: calm, combat, tension ou investigation.
 
-                RETORNE APENAS UM JSON VÁLIDO. Nenhuma palavra fora do JSON. Formato:
+                MUITO IMPORTANTE: Retorne ESTRITAMENTE um objeto JSON válido. NUNCA adicione blocos de markdown (\`\`\`json) ou texto solto. Formato:
                 {
                     "narrative": "Texto da sua narração...",
-                    "hp_change": numero (positivo cura, negativo dano, 0 nada),
+                    "hp_change": numero,
                     "sanity_change": numero,
                     "exp_gain": numero,
-                    "location": "Nome do Local Atualizado",
-                    "party_updates": ["Lista de nomes de quem está com o jogador agora"],
-                    "new_items": [{"name": "Nome", "desc": "Desc", "weight": 1, "type": "item/weapon/document"}],
-                    "lost_items": ["Nome do item a remover"],
+                    "location": "Nome do Local",
+                    "party_updates": ["nomes de aliados presentes"],
+                    "new_items": [{"name": "Item", "desc": "Desc", "weight": 1, "type": "item"}],
+                    "lost_items": ["nome do item excluido"],
                     "mood": "calm"
                 }
             `;
 
             try {
-                const aiResponse = await callGemini(prompt, true);
-                
-                // Process AI Updates
+                const aiResponse = await callAIProvider(prompt, true);
                 applyAIUpdates(aiResponse);
-                
-                // Display Narrative
                 addStoryEntry('system', aiResponse.narrative);
-
             } catch (error) {
                 console.error("AI Error:", error);
-                addStoryEntry('system', "[[ERRO DE CONEXÃO NEURAL: Falha ao contatar a IA. Tente novamente.]]");
+                addStoryEntry('system', "[[ERRO: A API demorou a responder ou devolveu dados inválidos. Tente novamente.]]");
             } finally {
                 document.getElementById('loading-indicator').classList.add('hidden');
                 isProcessing = false;
@@ -625,7 +619,6 @@
 
         function applyAIUpdates(data) {
             const p = gameState.player.stats;
-            
             if (data.hp_change) p.hp = Math.max(0, Math.min(p.maxHp, p.hp + data.hp_change));
             if (data.sanity_change) p.sanity = Math.max(0, Math.min(p.maxSanity, p.sanity + data.sanity_change));
             if (data.exp_gain) p.exp += data.exp_gain;
@@ -633,58 +626,86 @@
             if (data.location) gameState.context.location = data.location;
             if (data.party_updates) gameState.context.party = data.party_updates;
 
-            if (data.new_items && data.new_items.length > 0) {
-                gameState.inventory.items.push(...data.new_items);
-            }
-            if (data.lost_items && data.lost_items.length > 0) {
-                gameState.inventory.items = gameState.inventory.items.filter(i => !data.lost_items.includes(i.name));
-            }
+            if (data.new_items && data.new_items.length > 0) gameState.inventory.items.push(...data.new_items);
+            if (data.lost_items && data.lost_items.length > 0) gameState.inventory.items = gameState.inventory.items.filter(i => !data.lost_items.includes(i.name));
 
-            // Handle Audio Mood
-            if (data.mood && audioTracks[data.mood] && currentMood !== data.mood) {
-                playAudio(data.mood);
-            }
+            if (data.mood && audioTracks[data.mood] && currentMood !== data.mood) playAudio(data.mood);
 
             updateHUD();
             if(currentTab === 'inventory') renderTab();
             
-            // Death check
-            if (p.hp <= 0) {
-                setTimeout(() => addStoryEntry('system', "Você sucumbiu aos seus ferimentos. A escuridão te abraça... [FIM DE JOGO]"), 1000);
-            }
+            if (p.hp <= 0) setTimeout(() => addStoryEntry('system', "Você sucumbiu aos seus ferimentos. A escuridão te abraça... [FIM DE JOGO]"), 1000);
         }
 
-        // --- 5. UTILITIES (API, Audio, Storage, Modals) ---
+        // --- 5. MULTI-API INTEGRATION & UTILITIES ---
 
-        async function callGemini(promptText, expectJson = false) {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-            
-            const payload = {
-                contents: [{ parts: [{ text: promptText }] }],
-            };
+        function cleanJSONResponse(text) {
+            // Remove markdown format often added by free models
+            let cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+            const startIdx = cleaned.indexOf('{');
+            const endIdx = cleaned.lastIndexOf('}');
+            if (startIdx !== -1 && endIdx !== -1) {
+                cleaned = cleaned.substring(startIdx, endIdx + 1);
+            }
+            return JSON.parse(cleaned);
+        }
 
-            if (expectJson) {
-                payload.generationConfig = { responseMimeType: "application/json" };
+        async function callAIProvider(promptText, expectJson = false) {
+            let url, headers, payload;
+
+            // Gemini Routing
+            if (apiConfig.provider === 'gemini') {
+                url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiConfig.key}`;
+                headers = { 'Content-Type': 'application/json' };
+                payload = { contents: [{ parts: [{ text: promptText }] }] };
+                if (expectJson) payload.generationConfig = { responseMimeType: "application/json" };
+            } 
+            // OpenAI Compatible Routing (Groq / OpenRouter)
+            else {
+                headers = {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiConfig.key}`
+                };
+                
+                payload = {
+                    messages: [{ role: 'user', content: promptText }]
+                };
+
+                if (apiConfig.provider === 'groq') {
+                    url = '[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)';
+                    payload.model = 'llama3-8b-8192'; 
+                    if (expectJson) payload.response_format = { type: "json_object" };
+                } else if (apiConfig.provider === 'openrouter') {
+                    url = '[https://openrouter.ai/api/v1/chat/completions](https://openrouter.ai/api/v1/chat/completions)';
+                    // Fallback to a common free model
+                    payload.model = 'meta-llama/llama-3-8b-instruct:free';
+                    headers['HTTP-Referer'] = window.location.href;
+                    headers['X-Title'] = 'Nexus RPG';
+                    // OpenRouter free models might struggle with strict response_format flag, relying on prompt
+                }
             }
 
-            // Simple retry logic
-            let retries = 3;
+            let retries = 2;
             while(retries > 0) {
                 try {
-                    const response = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    
-                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    const response = await fetch(url, { method: 'POST', headers: headers, body: JSON.stringify(payload) });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     
                     const result = await response.json();
-                    const textOutput = result.candidates[0].content.parts[0].text;
+                    let textOutput = '';
+
+                    if (apiConfig.provider === 'gemini') {
+                        textOutput = result.candidates[0].content.parts[0].text;
+                    } else {
+                        textOutput = result.choices[0].message.content;
+                    }
                     
-                    return expectJson ? JSON.parse(textOutput) : textOutput;
+                    if (expectJson) {
+                        return cleanJSONResponse(textOutput);
+                    }
+                    return textOutput;
                 } catch (e) {
-                    console.warn("API call failed, retrying...", e);
+                    console.warn("API call falhou, tentando de novo...", e);
                     retries--;
                     if(retries === 0) throw e;
                     await new Promise(r => setTimeout(r, 1500));
@@ -692,32 +713,27 @@
             }
         }
 
-        // Audio System
+        // --- Áudio, Saves e Modals (Mantidos iguais) ---
+
         function loadAudio(event, mood) {
             const file = event.target.files[0];
-            if (file) {
-                const url = URL.createObjectURL(file);
-                audioTracks[mood] = url;
-            }
+            if (file) { audioTracks[mood] = URL.createObjectURL(file); }
         }
 
         function playAudio(mood) {
             const player = document.getElementById('bgm-player');
             if (audioTracks[mood]) {
                 player.src = audioTracks[mood];
-                player.play().catch(e => console.log("Navegador bloqueou autoplay de áudio.", e));
+                player.play().catch(e => console.log("Navegador bloqueou autoplay", e));
                 currentMood = mood;
             }
         }
 
-        // Save System
         function saveGame(notify = false) {
             try {
-                // To save space, we might limit history length in localStorage, but let's try full state first
                 localStorage.setItem('nexus_rpg_save', JSON.stringify(gameState));
                 if (notify) alert("Jogo salvo com sucesso!");
             } catch (e) {
-                console.error("Erro ao salvar. Pode ser limite de armazenamento (imagens muito grandes).", e);
                 if (notify) alert("Erro ao salvar. Limite de cache excedido.");
             }
         }
@@ -725,28 +741,18 @@
         function importSave(event) {
             const file = event.target.files[0];
             if (!file) return;
-
             const reader = new FileReader();
             reader.onload = (e) => {
                 try {
-                    const loadedState = JSON.parse(e.target.result);
-                    gameState = loadedState;
-                    
+                    gameState = JSON.parse(e.target.result);
                     document.getElementById('screen-setup').classList.add('hidden');
                     document.getElementById('screen-game').classList.remove('hidden');
-                    
-                    // Rebuild UI
                     updateHUD();
                     renderTab();
-                    
-                    const log = document.getElementById('story-log');
-                    log.innerHTML = '';
+                    document.getElementById('story-log').innerHTML = '';
                     gameState.history.forEach(entry => addStoryEntry(entry.role, entry.text, entry.actionType));
-                    
                     alert("Save carregado!");
-                } catch (err) {
-                    alert("Arquivo de save inválido.");
-                }
+                } catch (err) { alert("Arquivo de save inválido."); }
             };
             reader.readAsText(file);
         }
@@ -761,33 +767,20 @@
             downloadAnchorNode.remove();
         }
 
-        // NPC Modal System
         function openNPCModal(index = -1) {
             const modal = document.getElementById('modal-overlay');
             let npc = index >= 0 ? gameState.relationships[index] : { name: '', desc: '', affinity: 0, img: null };
-            
             modal.innerHTML = `
                 <div class="hud-panel p-6 w-full max-w-md flex flex-col gap-4">
                     <h3 class="text-xl font-bold text-sky-400 border-b border-gray-700 pb-2">${index >= 0 ? 'Editar NPC' : 'Novo NPC'}</h3>
-                    
-                    <div>
-                        <label class="text-xs text-gray-400">Nome:</label>
-                        <input type="text" id="npc-name" value="${npc.name}" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">
-                    </div>
-                    <div>
-                        <label class="text-xs text-gray-400">Afinidade (-100 a 100):</label>
-                        <input type="number" id="npc-affinity" value="${npc.affinity}" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">
-                    </div>
-                    <div>
-                        <label class="text-xs text-gray-400">Descrição / Personalidade:</label>
-                        <textarea id="npc-desc" rows="3" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">${npc.desc}</textarea>
-                    </div>
+                    <div><label class="text-xs text-gray-400">Nome:</label><input type="text" id="npc-name" value="${npc.name}" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm"></div>
+                    <div><label class="text-xs text-gray-400">Afinidade (-100 a 100):</label><input type="number" id="npc-affinity" value="${npc.affinity}" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm"></div>
+                    <div><label class="text-xs text-gray-400">Descrição / Personalidade:</label><textarea id="npc-desc" rows="3" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">${npc.desc}</textarea></div>
                     <div class="flex gap-2 mt-4">
                         <button onclick="saveNPC(${index})" class="flex-1 bg-sky-600 text-white py-2 rounded">Salvar</button>
                         <button onclick="document.getElementById('modal-overlay').classList.add('hidden')" class="flex-1 border border-gray-600 text-gray-300 py-2 rounded">Cancelar</button>
                     </div>
-                </div>
-            `;
+                </div>`;
             modal.classList.remove('hidden');
         }
 
@@ -795,34 +788,23 @@
             const name = document.getElementById('npc-name').value;
             const affinity = parseInt(document.getElementById('npc-affinity').value) || 0;
             const desc = document.getElementById('npc-desc').value;
-
             if(!name) return;
-
-            const npcObj = { name, affinity, desc, img: null }; // Manual image upload for NPCs skipped to save cache space, relying on icons.
-
-            if (index >= 0) {
-                gameState.relationships[index] = npcObj;
-            } else {
-                gameState.relationships.push(npcObj);
-            }
-
+            const npcObj = { name, affinity, desc, img: null };
+            if (index >= 0) gameState.relationships[index] = npcObj;
+            else gameState.relationships.push(npcObj);
             document.getElementById('modal-overlay').classList.add('hidden');
             renderTab();
             saveGame();
         }
 
-        // Run setup check on load
         window.onload = () => {
-            const saved = localStorage.getItem('nexus_rpg_save');
-            if (saved) {
-                // Show hint that a save exists
+            if (localStorage.getItem('nexus_rpg_save')) {
                 const btn = document.querySelector('button[onclick="document.getElementById(\'import-save\').click()"]');
                 btn.classList.remove('border-sky-600', 'text-sky-400');
                 btn.classList.add('bg-green-800', 'text-white', 'border-green-600');
                 btn.innerHTML = 'HÁ UM SAVE NO CACHE (IMPORTAR)';
             }
         };
-
     </script>
 </body>
 </html>
