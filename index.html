@@ -24,9 +24,6 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // O ambiente Canvas provê a autenticação automaticamente
-        const apiKey = ""; 
-
         // --- SISTEMA DE BANCO DE DADOS (IndexedDB para suportar imagens e áudio grandes) ---
         const DB_NAME = 'NexusRPGDB';
         const STORE_NAME = 'saveGames';
@@ -77,7 +74,7 @@
             }
         };
 
-        const callGemini = async (prompt, systemInstruction, isJson = true) => {
+        const callGemini = async (apiKey, prompt, systemInstruction, isJson = true) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
             
             const payload = {
@@ -106,7 +103,7 @@
             }
         };
 
-        const callGeminiImage = async (prompt) => {
+        const callGeminiImage = async (apiKey, prompt) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
             const payload = { instances: { prompt: prompt }, parameters: { sampleCount: 1 } };
             
@@ -123,7 +120,7 @@
             }
         };
 
-        const callGeminiTTS = async (text) => {
+        const callGeminiTTS = async (apiKey, text) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
             const payload = {
                 contents: [{ parts: [{ text: text }] }],
@@ -198,6 +195,7 @@
         };
 
         const App = () => {
+            const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
             const [gameState, setGameState] = useState(null);
             const [currentTab, setCurrentTab] = useState('historia');
             const [loadingStr, setLoadingStr] = useState('');
@@ -266,7 +264,7 @@
 
             const handleError = (e) => {
                 if (e.message && e.message.includes('401')) {
-                    alert("Erro de Autenticação (401): A sessão do Canvas pode ter expirado ou o acesso à IA foi negado. Por favor, recarregue a página e tente novamente.");
+                    alert("Erro de Autenticação (401): A chave da API é inválida ou expirou. Verifique sua chave nas configurações iniciais.");
                 } else {
                     alert("Erro de conexão com a API: " + e.message + ". Tente novamente.");
                 }
@@ -275,6 +273,7 @@
 
             const startGame = async () => {
                 if (!setupData.charName) return alert("Dê um nome ao seu personagem.");
+                if (!apiKey.trim()) return alert("Insira a chave da API do Gemini para jogar.");
                 
                 setLoadingStr('Gerando aventura e atributos...');
                 
@@ -293,7 +292,7 @@
                 }`;
 
                 try {
-                    const response = await callGemini("Inicie o jogo.", sysPrompt, true);
+                    const response = await callGemini(apiKey, "Inicie o jogo.", sysPrompt, true);
                     
                     const newGame = {
                         player: {
@@ -322,6 +321,7 @@
 
             const processAction = async (actionType, text) => {
                 if (!text.trim() || loadingStr) return;
+                if (!apiKey.trim()) return alert("Insira a chave da API do Gemini.");
                 
                 const newStory = [...gameState.story, { role: 'user', type: actionType, text: text }];
                 setGameState(prev => ({ ...prev, story: newStory }));
@@ -352,7 +352,7 @@
                 const userPrompt = `O jogador escolheu [${actionType.toUpperCase()}]: "${text}"`;
 
                 try {
-                    const response = await callGemini(userPrompt, sysPrompt, true);
+                    const response = await callGemini(apiKey, userPrompt, sysPrompt, true);
                     
                     setGameState(prev => {
                         let newState = { ...prev };
@@ -421,8 +421,9 @@
             };
 
             const generateAvatar = async (prompt, callback) => {
+                if (!apiKey.trim()) return alert("Insira a chave da API do Gemini primeiro.");
                 setLoadingStr("Gerando imagem...");
-                const imgBase64 = await callGeminiImage(prompt);
+                const imgBase64 = await callGeminiImage(apiKey, prompt);
                 if (imgBase64) callback(imgBase64);
                 else alert("Falha ao gerar imagem.");
                 setLoadingStr("");
@@ -437,8 +438,32 @@
                             <p className="text-slate-400">Inteligência Artificial Direcionando seu Destino</p>
                             
                             <div className="space-y-4 pt-4">
-                                <button onClick={() => setSetupData({...setupData, startedSetup: true})} className="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition">Nova Campanha</button>
+                                <button 
+                                    onClick={() => {
+                                        if (!apiKey.trim()) return alert("Por favor, insira sua chave da API do Google Gemini antes de continuar.");
+                                        setSetupData({...setupData, startedSetup: true});
+                                    }} 
+                                    className="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition">
+                                    Nova Campanha
+                                </button>
                                 <button onClick={loadGame} className="w-full py-3 bg-slate-700 hover:bg-slate-600 rounded-lg font-semibold transition">Carregar Jogo Salvo</button>
+
+                                <div className="pt-6 border-t border-slate-700 text-left">
+                                    <label className="block text-sm font-medium mb-1 text-slate-300">Google Gemini API Key</label>
+                                    <input 
+                                        type="password" 
+                                        value={apiKey} 
+                                        onChange={(e) => { 
+                                            setApiKey(e.target.value); 
+                                            localStorage.setItem('gemini_api_key', e.target.value); 
+                                        }} 
+                                        className="w-full bg-slate-800 border border-slate-600 rounded p-2 focus:border-blue-500 outline-none text-sm text-white placeholder-slate-500" 
+                                        placeholder="Cole sua chave AIzaSy... aqui" 
+                                    />
+                                    <p className="text-[11px] text-slate-500 mt-2">
+                                        Sua chave é salva apenas localmente no seu navegador e é usada para comunicar diretamente com o Google.
+                                    </p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -578,12 +603,13 @@
                     {/* MAIN CONTENT AREA */}
                     <main className="flex-1 overflow-hidden relative">
                         {currentTab === 'historia' && (
-                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} />
+                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} apiKey={apiKey} />
                         )}
                         {currentTab === 'inventario' && (
                             <InventoryTab 
                                 inventory={gameState.inventory} 
                                 attributes={p.attributes} 
+                                apiKey={apiKey}
                                 updateInventory={(newItems) => {
                                     const newState = {...gameState, inventory: {...gameState.inventory, items: newItems}};
                                     setGameState(newState);
@@ -594,6 +620,7 @@
                         {currentTab === 'relacionamentos' && (
                             <RelationshipsTab 
                                 rels={gameState.relationships} 
+                                apiKey={apiKey}
                                 updateRel={(idx, data) => {
                                     const newRels = [...gameState.relationships];
                                     newRels[idx] = {...newRels[idx], ...data};
@@ -615,7 +642,7 @@
 
         // --- SUBCOMPONENTS ---
 
-        const StoryTab = ({ story, onAction, isLoading }) => {
+        const StoryTab = ({ story, onAction, isLoading, apiKey }) => {
             const endRef = useRef(null);
             const [inputText, setInputText] = useState('');
             const [actionType, setActionType] = useState('ação');
@@ -633,17 +660,19 @@
             };
 
             const handleGetHints = async () => {
+                if (!apiKey) return alert("API Key necessária.");
                 setIsFetchingHints(true);
                 const sysPrompt = `Analise a última narração e sugira 3 opções curtas de ação criativas para o jogador (máx 5 palavras cada). Retorne JSON: {"hints": ["opção 1", "opção 2", "opção 3"]}`;
                 const promptText = `Última narração: ${story[story.length - 1]?.text || 'Início da aventura'}`;
                 try {
-                    const res = await callGemini(promptText, sysPrompt, true);
+                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
                     if (res && res.hints) setHints(res.hints);
                 } catch (e) { console.error(e); }
                 setIsFetchingHints(false);
             };
 
             const handlePlayTTS = async (text) => {
+                if (!apiKey) return alert("API Key necessária para narração.");
                 if (playingAudio) {
                     if (playingAudio !== 'loading') playingAudio.pause();
                     setPlayingAudio(null);
@@ -651,7 +680,7 @@
                 }
                 setPlayingAudio('loading');
                 const cleanText = text.replace(/<[^>]*>?/gm, ''); // Remove tags HTML
-                const audioUrl = await callGeminiTTS(cleanText);
+                const audioUrl = await callGeminiTTS(apiKey, cleanText);
                 if (audioUrl) {
                     const audio = new Audio(audioUrl);
                     audio.onended = () => setPlayingAudio(null);
@@ -659,7 +688,7 @@
                     setPlayingAudio(audio);
                 } else {
                     setPlayingAudio(null);
-                    alert("Aviso: Falha ao gerar o áudio. A sessão do modelo TTS pode estar indisponível no momento.");
+                    alert("Aviso: Falha ao gerar o áudio. Verifique sua chave ou tente novamente.");
                 }
             };
 
@@ -734,18 +763,19 @@
             );
         };
 
-        const InventoryTab = ({ inventory, attributes, updateInventory }) => {
+        const InventoryTab = ({ inventory, attributes, updateInventory, apiKey }) => {
             const [selectedDoc, setSelectedDoc] = useState(null);
             const [isAnalyzing, setIsAnalyzing] = useState(false);
             const totalItems = inventory.items.length;
             const overload = totalItems > inventory.capacity;
 
             const handleAnalyzeItem = async () => {
+                if (!apiKey) return alert("API Key necessária.");
                 setIsAnalyzing(true);
                 const sysPrompt = `Você é um sábio narrador. Crie um parágrafo fascinante de lore, lenda ou propriedade mágica secreta sobre este item. Retorne JSON: {"lore": "texto gerado aqui"}`;
                 const promptText = `Item: ${selectedDoc.name}. Descrição Base: ${selectedDoc.desc}`;
                 try {
-                    const res = await callGemini(promptText, sysPrompt, true);
+                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
                     if (res && res.lore) {
                         const newItems = inventory.items.map(item => 
                             item.name === selectedDoc.name ? { ...item, lore: res.lore } : item
@@ -755,7 +785,7 @@
                     }
                 } catch (e) { 
                     console.error(e);
-                    alert("Aviso: Falha ao inspecionar o item. Tente novamente em instantes.");
+                    alert("Aviso: Falha ao inspecionar o item. Verifique sua chave ou tente novamente.");
                 }
                 setIsAnalyzing(false);
             };
@@ -832,7 +862,7 @@
             );
         };
 
-        const RelationshipsTab = ({ rels, updateRel }) => {
+        const RelationshipsTab = ({ rels, updateRel, apiKey }) => {
             const [editingNpc, setEditingNpc] = useState(null);
 
             const handleImgUpload = (e, idx) => {
@@ -844,9 +874,10 @@
             };
 
             const genNpcImage = async (idx, npc) => {
+                if (!apiKey) return alert("API Key necessária para gerar imagens.");
                 updateRel(idx, { isGeneratingImg: true });
                 const prompt = `Retrato de personagem de RPG: ${npc.name}. Aparelho: ${npc.appearance || 'aparência genérica'}. Estilo de arte conceitual de jogo, focado no rosto.`;
-                const img = await callGeminiImage(prompt);
+                const img = await callGeminiImage(apiKey, prompt);
                 updateRel(idx, { avatar: img, isGeneratingImg: false });
             };
 
