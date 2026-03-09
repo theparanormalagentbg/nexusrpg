@@ -1,725 +1,828 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { User, Heart, Brain, Zap, Shield, MapPin, Users, Settings, Package, Music, Image as ImageIcon, MessageSquare, Send, Save, Download, Upload, Loader2, Play, Square } from 'lucide-react';
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus RPG - AI Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap');
 
-// --- CONFIGURAÇÃO DA API GEMINI ---
-// O ambiente do Canvas injeta a chave aqui, mas deixamos editável para quando exportar
-let envApiKey = "";
-if (typeof apiKey !== 'undefined') { envApiKey = apiKey; }
-
-const App = () => {
-  // --- ESTADOS GERAIS ---
-  const [apiKeyInput, setApiKeyInput] = useState(envApiKey);
-  const [gameState, setGameState] = useState('menu'); // menu, setup, playing
-  const [activeTab, setActiveTab] = useState('story'); // story, inventory, npcs, music, settings
-  const [loading, setLoading] = useState(false);
-  const [systemMessage, setSystemMessage] = useState('');
-
-  // --- ESTADOS DO JOGO ---
-  const [campaignType, setCampaignType] = useState('original');
-  const [genre, setGenre] = useState('');
-  const [customSetting, setCustomSetting] = useState('');
-  
-  const [player, setPlayer] = useState({
-    name: '', race: '', class: '',
-    hp: 20, maxHp: 20, sanity: 10, maxSanity: 10, exp: 0, effort: 5, maxEffort: 5,
-    attributes: { forca: 10, destreza: 10, inteligencia: 10, carisma: 10 },
-    backstory: '', skills: [], image: null
-  });
-
-  const [location, setLocation] = useState('A Origem');
-  const [party, setParty] = useState([]); // Apenas nomes para o HUD
-  const [npcs, setNpcs] = useState([]); // Objetos completos
-  const [inventory, setInventory] = useState({
-    limit: 10,
-    items: [
-      { id: '1', name: 'Rações de Viagem', type: 'consumable', desc: 'Comida para 3 dias.' }
-    ]
-  });
-
-  const [history, setHistory] = useState([]);
-  const [contextLog, setContextLog] = useState("Início da aventura."); // Resumo para a IA
-
-  // --- ESTADOS DE UI E MÚSICA ---
-  const [inputText, setInputText] = useState('');
-  const [inputMode, setInputMode] = useState('acao'); // acao, fala, descricao
-  const [musicTracks, setMusicTracks] = useState({
-    combate: null, calmo: null, tensao: null, boss: null
-  });
-  const [currentTrackName, setCurrentTrackName] = useState(null);
-  const audioRef = useRef(new Audio());
-  const chatEndRef = useRef(null);
-
-  // --- AUTO SCROLL ---
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [history]);
-
-  // --- SISTEMA DE MÚSICA ---
-  const handleMusicUpload = (type, e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      setMusicTracks(prev => ({ ...prev, [type]: url }));
-    }
-  };
-
-  const playMusic = (type) => {
-    if (currentTrackName === type) {
-      audioRef.current.pause();
-      setCurrentTrackName(null);
-      return;
-    }
-    if (musicTracks[type]) {
-      audioRef.current.src = musicTracks[type];
-      audioRef.current.loop = true;
-      audioRef.current.play();
-      setCurrentTrackName(type);
-    } else {
-      showSystemMessage("Nenhuma música carregada para este clima.");
-    }
-  };
-
-  // --- HELPERS ---
-  const showSystemMessage = (msg) => {
-    setSystemMessage(msg);
-    setTimeout(() => setSystemMessage(''), 3000);
-  };
-
-  const handleImageUpload = (e, targetId = null) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (targetId === 'player') {
-          setPlayer(prev => ({ ...prev, image: reader.result }));
-        } else {
-          setNpcs(prev => prev.map(npc => npc.id === targetId ? { ...npc, image: reader.result } : npc));
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  // --- CHAMADAS DE API GEMINI ---
-  const callGemini = async (prompt, isJson = false, isImage = false) => {
-    if (!apiKeyInput) {
-      showSystemMessage("Erro: Chave da API ausente. Vá em Configurações.");
-      return null;
-    }
-
-    try {
-      if (isImage) {
-        // Fallback obrigatório para Canvas (gemini-2.5-flash-image-preview)
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKeyInput}`;
-        const payload = {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
-        };
-        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        const data = await response.json();
-        
-        const base64 = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-        if (base64) return `data:image/jpeg;base64,${base64}`;
-        return null;
-      } else {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKeyInput}`;
-        
-        const systemInstruction = isJson ? 
-          `Você é o Mestre de um RPG de mesa. Responda ESTRITAMENTE em JSON válido usando este formato exato:
-          {
-            "narrativa": "O texto da história descrevendo o que acontece...",
-            "localAtual": "Nome do local",
-            "npcsNoGrupo": ["Nome1", "Nome2"],
-            "atualizacoesJogador": { "hp": 0, "sanidade": 0, "exp": 0, "esforco": 0 },
-            "itensAdicionados": [{"id": "unico", "name": "Nome", "type": "arma/documento/item", "damage": "1d6 se arma", "desc": "descrição"}],
-            "itensRemovidos": ["ID do item a remover"],
-            "novosNpcsConhecidos": [{"id": "unico", "name": "Nome", "affinity": 50, "personality": "...", "appearance": "..."}]
-          }` : 
-          "Você é um assistente de criação de RPG. Responda em texto claro e direto.";
-
-        const payload = {
-          contents: [{ parts: [{ text: prompt }] }],
-          systemInstruction: { parts: [{ text: systemInstruction }] }
-        };
-
-        if (isJson) {
-          payload.generationConfig = { responseMimeType: "application/json" };
+        :root {
+            --ui-bg: rgba(15, 23, 42, 0.85);
+            --ui-border: rgba(56, 189, 248, 0.3);
+            --ui-accent: #38bdf8;
+            --hp-color: #ef4444;
+            --san-color: #8b5cf6;
+            --stm-color: #eab308;
+            --exp-color: #3b82f6;
         }
 
-        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-        const data = await response.json();
-        
-        const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (isJson) {
-          try {
-             return JSON.parse(textResponse);
-          } catch (e) {
-             console.error("Falha ao fazer parse do JSON", textResponse);
-             // Tenta extrair JSON se a IA enviou markdown
-             const match = textResponse.match(/```json\n([\s\S]*?)\n```/);
-             if (match) return JSON.parse(match[1]);
-             throw new Error("Resposta da IA não foi um JSON válido.");
-          }
+        body {
+            font-family: 'Rajdhani', sans-serif;
+            background-color: #050505;
+            background-image: radial-gradient(circle at 50% 50%, #1e1b4b 0%, #000000 100%);
+            color: #e2e8f0;
+            overflow: hidden; /* Prevent body scroll, handle inside panels */
         }
-        return textResponse;
-      }
-    } catch (error) {
-      console.error(error);
-      showSystemMessage("Erro na comunicação com a IA.");
-      return null;
-    }
-  };
 
-  // --- AÇÕES DO JOGO ---
-  const generatePlayerBackground = async () => {
-    setLoading(true);
-    const prompt = `Crie uma história de fundo curta (1 parágrafo), atributos (forca, destreza, inteligencia, carisma de 1 a 20) e 3 habilidades iniciais para um personagem chamado ${player.name}, da raça ${player.race} e classe ${player.class} no gênero ${genre || customSetting}. Responda em JSON: {"backstory": "...", "attributes": {"forca": 10...}, "skills": ["hab1", "hab2", "hab3"]}`;
-    
-    const result = await callGemini(prompt, true);
-    if (result) {
-      setPlayer(prev => ({ ...prev, backstory: result.backstory, attributes: result.attributes, skills: result.skills }));
-    }
-    setLoading(false);
-  };
-
-  const generateNpcImage = async (npcId, appearance, genre) => {
-    setLoading(true);
-    showSystemMessage("Gerando retrato...");
-    const prompt = `A portrait of a fantasy/sci-fi RPG character. Appearance: ${appearance}. Setting: ${genre || 'dark fantasy'}. High quality, digital art, character concept art.`;
-    const imageUrl = await callGemini(prompt, false, true);
-    
-    if (imageUrl) {
-      setNpcs(prev => prev.map(n => n.id === npcId ? { ...n, image: imageUrl } : n));
-    } else {
-      showSystemMessage("Falha ao gerar imagem. O modelo de imagem pode não estar disponível.");
-    }
-    setLoading(false);
-  };
-
-  const startGame = async () => {
-    setLoading(true);
-    setGameState('playing');
-    
-    const prompt = `Inicie a campanha. Cenário: ${campaignType === 'custom' ? customSetting : genre}. 
-    Personagem: ${player.name}, ${player.race} ${player.class}. História: ${player.backstory}.
-    Descreva a cena inicial, onde o personagem está, e pergunte o que ele faz.`;
-
-    const result = await callGemini(prompt, true);
-    if (result) {
-      processGmResponse(result);
-    }
-    setLoading(false);
-  };
-
-  const processGmResponse = (data) => {
-    // Atualiza História
-    setHistory(prev => [...prev, { role: 'gm', content: data.narrativa }]);
-    setContextLog(prev => (prev + " \n " + data.narrativa).slice(-2000)); // Mantém contexto limitado
-    
-    // Atualiza HUD Direito
-    if (data.localAtual) setLocation(data.localAtual);
-    if (data.npcsNoGrupo) setParty(data.npcsNoGrupo);
-
-    // Atualiza Status do Jogador
-    if (data.atualizacoesJogador) {
-      setPlayer(prev => ({
-        ...prev,
-        hp: Math.min(prev.maxHp, Math.max(0, prev.hp + (data.atualizacoesJogador.hp || 0))),
-        sanity: Math.min(prev.maxSanity, Math.max(0, prev.sanity + (data.atualizacoesJogador.sanidade || 0))),
-        exp: prev.exp + (data.atualizacoesJogador.exp || 0),
-        effort: Math.min(prev.maxEffort, Math.max(0, prev.effort + (data.atualizacoesJogador.esforco || 0)))
-      }));
-    }
-
-    // Atualiza Inventário
-    if (data.itensAdicionados && data.itensAdicionados.length > 0) {
-      setInventory(prev => ({ ...prev, items: [...prev.items, ...data.itensAdicionados] }));
-      showSystemMessage(`Novos itens recebidos!`);
-    }
-    if (data.itensRemovidos && data.itensRemovidos.length > 0) {
-      setInventory(prev => ({ ...prev, items: prev.items.filter(i => !data.itensRemovidos.includes(i.id)) }));
-    }
-
-    // Atualiza NPCs Relacionamentos
-    if (data.novosNpcsConhecidos && data.novosNpcsConhecidos.length > 0) {
-      setNpcs(prev => {
-        const newNpcs = [...prev];
-        data.novosNpcsConhecidos.forEach(newNpc => {
-          if (!newNpcs.find(n => n.name === newNpc.name)) {
-            newNpcs.push({ ...newNpc, backstory: 'Desconhecida', image: null });
-          }
-        });
-        return newNpcs;
-      });
-    }
-  };
-
-  const handleAction = async () => {
-    if (!inputText.trim()) return;
-    
-    const actionText = inputText;
-    setInputText('');
-    setHistory(prev => [...prev, { role: 'player', type: inputMode, content: actionText }]);
-    setLoading(true);
-
-    const prompt = `Contexto recente: ${contextLog}
-    Status do jogador: HP ${player.hp}/${player.maxHp}, Sanidade ${player.sanity}/${player.maxSanity}.
-    Inventário atual: ${inventory.items.map(i=>i.name).join(', ')}.
-    Ação do jogador (${inputMode}): "${actionText}".
-    Resolva a ação, atualize a narrativa e retorne o JSON de acordo com a instrução do sistema. Se for combate, aplique dano. Se pegar algo, adicione ao inventário.`;
-
-    const result = await callGemini(prompt, true);
-    if (result) {
-      processGmResponse(result);
-    } else {
-      setHistory(prev => [...prev, { role: 'gm', content: "O Mestre teve um lapso de memória (Erro de conexão). Tente novamente." }]);
-    }
-    setLoading(false);
-  };
-
-  // --- SAVE / LOAD ---
-  const saveGame = () => {
-    const saveData = { player, location, party, npcs, inventory, history, contextLog, genre, customSetting, campaignType };
-    localStorage.setItem('nexusRpgSave', JSON.stringify(saveData));
-    showSystemMessage("Jogo Salvo Localmente!");
-  };
-
-  const loadGame = () => {
-    const data = localStorage.getItem('nexusRpgSave');
-    if (data) {
-      const parsed = JSON.parse(data);
-      setPlayer(parsed.player); setLocation(parsed.location); setParty(parsed.party);
-      setNpcs(parsed.npcs); setInventory(parsed.inventory); setHistory(parsed.history);
-      setContextLog(parsed.contextLog); setGenre(parsed.genre); setCustomSetting(parsed.customSetting);
-      setCampaignType(parsed.campaignType);
-      setGameState('playing');
-      showSystemMessage("Jogo Carregado!");
-    } else {
-      showSystemMessage("Nenhum save encontrado.");
-    }
-  };
-
-  const exportGame = () => {
-    const saveData = { player, location, party, npcs, inventory, history, contextLog };
-    const blob = new Blob([JSON.stringify(saveData)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `NexusSave_${player.name || 'Game'}.json`;
-    a.click();
-  };
-
-  const importGame = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        try {
-          const parsed = JSON.parse(event.target.result);
-          setPlayer(parsed.player); setLocation(parsed.location); setParty(parsed.party);
-          setNpcs(parsed.npcs); setInventory(parsed.inventory); setHistory(parsed.history);
-          setContextLog(parsed.contextLog);
-          setGameState('playing');
-        } catch (err) {
-          showSystemMessage("Arquivo inválido.");
+        .hud-panel {
+            background: var(--ui-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--ui-border);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.5), inset 0 0 20px rgba(56, 189, 248, 0.05);
+            border-radius: 8px;
         }
-      };
-      reader.readAsText(file);
-    }
-  };
 
+        .terminal-text {
+            font-family: 'Space Mono', monospace;
+        }
 
-  // ================= RENDERIZAÇÃO =================
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+        ::-webkit-scrollbar-thumb { background: var(--ui-accent); border-radius: 3px; }
 
-  if (gameState === 'menu') {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col items-center justify-center p-4 font-sans">
-        <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-600 mb-8 tracking-tighter">NEXUS RPG</h1>
-        
-        <div className="flex flex-col gap-4 w-full max-w-md">
-          <button onClick={() => { setCampaignType('original'); setGameState('setup'); }} className="p-4 bg-slate-900 border border-slate-700 hover:border-blue-500 rounded-lg font-bold transition-all text-left group">
-            <span className="text-blue-400 group-hover:text-blue-300 block">Campanha Original</span>
-            <span className="text-sm font-normal text-slate-500">Escolha o gênero e deixe a IA mestrar o mundo dela.</span>
-          </button>
-          
-          <button onClick={() => { setCampaignType('custom'); setGameState('setup'); }} className="p-4 bg-slate-900 border border-slate-700 hover:border-purple-500 rounded-lg font-bold transition-all text-left group">
-            <span className="text-purple-400 group-hover:text-purple-300 block">Campanha Customizada</span>
-            <span className="text-sm font-normal text-slate-500">Defina o universo, regras e personagens conhecidos.</span>
-          </button>
+        /* Status Bars */
+        .status-bar-bg { background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1); }
+        .bar-fill { transition: width 0.3s ease; }
 
-          <button onClick={loadGame} className="p-4 bg-slate-900 border border-slate-700 hover:border-emerald-500 rounded-lg font-bold transition-all flex items-center justify-between">
-            <span>Continuar Jogo</span>
-            <Save size={18} />
-          </button>
-        </div>
+        /* CRT Scanline effect overlay */
+        .scanlines {
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 4px, 3px 100%;
+            pointer-events: none;
+            z-index: 9999;
+            opacity: 0.15;
+        }
 
-        {systemMessage && <div className="mt-8 text-yellow-400 text-sm">{systemMessage}</div>}
-      </div>
-    );
-  }
+        .tab-btn.active {
+            border-bottom: 2px solid var(--ui-accent);
+            color: var(--ui-accent);
+        }
 
-  if (gameState === 'setup') {
-    return (
-      <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans overflow-y-auto">
-        <div className="max-w-2xl mx-auto space-y-8 pb-20">
-          <button onClick={() => setGameState('menu')} className="text-slate-500 hover:text-white">← Voltar</button>
-          
-          <div>
-            <h2 className="text-2xl font-bold mb-4 border-b border-slate-800 pb-2">Configuração do Mundo</h2>
-            {campaignType === 'original' ? (
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">Gênero Literário</label>
-                <input type="text" placeholder="Ex: Cyberpunk, Fantasia Sombria, Steampunk..." value={genre} onChange={(e) => setGenre(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
-              </div>
-            ) : (
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">Descreva seu Universo em Detalhes</label>
-                <textarea rows="4" placeholder="Ex: O universo de Star Wars durante o Império. Eu sou um contrabandista procurado pelo Darth Vader..." value={customSetting} onChange={(e) => setCustomSetting(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white"></textarea>
-              </div>
-            )}
-          </div>
+        .loading-pulse { animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col text-sm md:text-base">
+    <div class="scanlines"></div>
 
-          <div>
-            <h2 className="text-2xl font-bold mb-4 border-b border-slate-800 pb-2">Criação de Personagem</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">Nome</label>
-                <input type="text" value={player.name} onChange={(e) => setPlayer(e.target.value, 'name')} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
-              </div>
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">Raça</label>
-                <input type="text" value={player.race} onChange={(e) => setPlayer(e.target.value, 'race')} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
-              </div>
-              <div className="md:col-span-2">
-                <label className="block text-sm text-slate-400 mb-1">Classe / Profissão</label>
-                <input type="text" value={player.class} onChange={(e) => setPlayer(e.target.value, 'class')} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
-              </div>
-            </div>
-
-            <div className="flex gap-4">
-              <button onClick={generatePlayerBackground} disabled={loading || !player.name} className="flex-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded p-2 font-bold flex justify-center items-center gap-2">
-                {loading ? <Loader2 className="animate-spin" size={18} /> : <Brain size={18} />}
-                Gerar História e Status com IA
-              </button>
-            </div>
-
-            {player.backstory && (
-              <div className="mt-6 bg-slate-900 border border-slate-700 p-4 rounded-lg">
-                <h3 className="font-bold text-blue-400 mb-2">Ficha Gerada:</h3>
-                <p className="text-sm text-slate-300 italic mb-4">"{player.backstory}"</p>
-                <div className="flex flex-wrap gap-4 text-sm">
-                  <span className="bg-slate-800 px-2 py-1 rounded">FOR: {player.attributes.forca}</span>
-                  <span className="bg-slate-800 px-2 py-1 rounded">DES: {player.attributes.destreza}</span>
-                  <span className="bg-slate-800 px-2 py-1 rounded">INT: {player.attributes.inteligencia}</span>
-                  <span className="bg-slate-800 px-2 py-1 rounded">CAR: {player.attributes.carisma}</span>
-                </div>
-                <div className="mt-4">
-                  <span className="text-xs text-slate-500 uppercase">Habilidades:</span>
-                  <div className="flex gap-2 mt-1">
-                    {player.skills.map(s => <span key={s} className="bg-blue-900/30 text-blue-300 border border-blue-800/50 px-2 py-1 rounded text-xs">{s}</span>)}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          <button onClick={startGame} disabled={loading || !player.name || !player.backstory} className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 rounded-lg font-black text-xl transition-all shadow-lg shadow-blue-900/20">
-            {loading ? 'Iniciando Servidor Neural...' : 'INICIAR JOGO'}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Setadores locais de propriedade no setup
-  const setPlayerProp = (val, prop) => setPlayer(prev => ({ ...prev, [prop]: val }));
-
-  // ================= HUD DE JOGO =================
-  return (
-    <div className="h-screen bg-slate-950 text-slate-200 flex flex-col font-sans overflow-hidden">
-      
-      {/* TOAST SYSTEM */}
-      {systemMessage && (
-        <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-blue-900 text-white px-4 py-2 rounded shadow-xl z-50 text-sm font-bold animate-pulse">
-          {systemMessage}
-        </div>
-      )}
-
-      {/* TOP HUD */}
-      <div className="h-auto md:h-20 bg-slate-900 border-b border-slate-800 flex flex-col md:flex-row justify-between shrink-0 px-2 py-2 gap-2">
-        
-        {/* PLAYER INFO (Esquerda) */}
-        <div className="flex items-center gap-3">
-          <div className="relative w-12 h-12 md:w-16 md:h-16 bg-slate-800 rounded border-2 border-slate-700 overflow-hidden shrink-0 group">
-            {player.image ? <img src={player.image} alt="Player" className="w-full h-full object-cover" /> : <User className="w-full h-full p-2 text-slate-600" />}
-            <label className="absolute inset-0 bg-black/50 hidden group-hover:flex items-center justify-center cursor-pointer">
-              <Upload size={16} className="text-white" />
-              <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e, 'player')} />
-            </label>
-          </div>
-          <div className="flex flex-col min-w-[200px]">
-            <span className="font-bold text-lg leading-none truncate">{player.name}</span>
-            <span className="text-xs text-slate-500 uppercase tracking-widest truncate">{player.race} {player.class}</span>
-            <div className="grid grid-cols-2 gap-x-2 gap-y-1 mt-1">
-              <div className="flex items-center gap-1 bg-red-950/30 rounded px-1">
-                <Heart size={10} className="text-red-500" />
-                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-red-500 h-full" style={{ width: `${(player.hp/player.maxHp)*100}%` }}></div>
-                </div>
-                <span className="text-[10px] text-red-400 w-6 text-right">{player.hp}</span>
-              </div>
-              <div className="flex items-center gap-1 bg-purple-950/30 rounded px-1">
-                <Brain size={10} className="text-purple-500" />
-                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-purple-500 h-full" style={{ width: `${(player.sanity/player.maxSanity)*100}%` }}></div>
-                </div>
-                <span className="text-[10px] text-purple-400 w-6 text-right">{player.sanity}</span>
-              </div>
-              <div className="flex items-center gap-1 bg-yellow-950/30 rounded px-1 col-span-2">
-                <Zap size={10} className="text-yellow-500" />
-                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-yellow-500 h-full" style={{ width: `${(player.effort/player.maxEffort)*100}%` }}></div>
-                </div>
-                <span className="text-[10px] text-yellow-400 w-6 text-right">{player.effort}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* ENVIRONMENT INFO (Direita) */}
-        <div className="flex flex-col items-start md:items-end justify-center px-2 border-t border-slate-800 md:border-t-0 pt-2 md:pt-0">
-          <div className="flex items-center gap-2 text-blue-400 font-bold">
-            <MapPin size={16} />
-            <span>{location}</span>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
-            <Users size={14} />
-            <span>Grupo: {party.length > 0 ? party.join(', ') : 'Sozinho'}</span>
-          </div>
-          <div className="text-[10px] text-emerald-500 mt-1 font-mono uppercase border border-emerald-900/50 bg-emerald-950/20 px-1 rounded">
-            EXP: {player.exp}
-          </div>
-        </div>
-      </div>
-
-      {/* MOBILE NAV TABS */}
-      <div className="flex md:hidden bg-slate-900 border-b border-slate-800 overflow-x-auto hide-scrollbar shrink-0">
-        <button onClick={() => setActiveTab('story')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'story' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-500'}`}><MessageSquare size={16}/> História</button>
-        <button onClick={() => setActiveTab('inventory')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'inventory' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500'}`}><Package size={16}/> Inventário</button>
-        <button onClick={() => setActiveTab('npcs')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'npcs' ? 'border-purple-500 text-purple-400' : 'border-transparent text-slate-500'}`}><Users size={16}/> NPCs</button>
-        <button onClick={() => setActiveTab('music')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'music' ? 'border-yellow-500 text-yellow-400' : 'border-transparent text-slate-500'}`}><Music size={16}/> Som</button>
-        <button onClick={() => setActiveTab('settings')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'settings' ? 'border-slate-500 text-slate-300' : 'border-transparent text-slate-500'}`}><Settings size={16}/> Menu</button>
-      </div>
-
-      {/* MAIN CONTENT AREA */}
-      <div className="flex-1 flex overflow-hidden">
-        
-        {/* SIDEBAR (Desktop) */}
-        <div className="hidden md:flex flex-col w-20 bg-slate-900 border-r border-slate-800 py-4 items-center gap-6 shrink-0">
-          <button onClick={() => setActiveTab('story')} className={`p-3 rounded-xl transition-all ${activeTab === 'story' ? 'bg-blue-600/20 text-blue-400' : 'text-slate-500 hover:bg-slate-800'}`} title="História"><MessageSquare size={24}/></button>
-          <button onClick={() => setActiveTab('inventory')} className={`p-3 rounded-xl transition-all ${activeTab === 'inventory' ? 'bg-emerald-600/20 text-emerald-400' : 'text-slate-500 hover:bg-slate-800'}`} title="Inventário"><Package size={24}/></button>
-          <button onClick={() => setActiveTab('npcs')} className={`p-3 rounded-xl transition-all ${activeTab === 'npcs' ? 'bg-purple-600/20 text-purple-400' : 'text-slate-500 hover:bg-slate-800'}`} title="Relacionamentos"><Users size={24}/></button>
-          <button onClick={() => setActiveTab('music')} className={`p-3 rounded-xl transition-all ${activeTab === 'music' ? 'bg-yellow-600/20 text-yellow-400' : 'text-slate-500 hover:bg-slate-800'}`} title="Trilha Sonora"><Music size={24}/></button>
-          <div className="mt-auto"></div>
-          <button onClick={() => setActiveTab('settings')} className={`p-3 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:bg-slate-800'}`} title="Configurações"><Settings size={24}/></button>
-        </div>
-
-        {/* PANELS */}
-        <div className="flex-1 relative overflow-y-auto bg-slate-950 p-4 custom-scrollbar pb-24 md:pb-32">
-          
-          {/* TAB: STORY */}
-          <div className={`${activeTab === 'story' ? 'block' : 'hidden'} max-w-3xl mx-auto space-y-6`}>
-            {history.map((msg, i) => (
-              <div key={i} className={`flex flex-col ${msg.role === 'player' ? 'items-end' : 'items-start'}`}>
-                {msg.role === 'player' && (
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[10px] uppercase text-slate-500 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800">{msg.type}</span>
-                  </div>
-                )}
-                <div className={`p-4 rounded-2xl max-w-[90%] md:max-w-[80%] leading-relaxed shadow-sm ${
-                  msg.role === 'player' 
-                    ? 'bg-blue-900/20 border border-blue-900/50 text-blue-100 rounded-tr-sm' 
-                    : 'bg-slate-900 border border-slate-800 text-slate-300 rounded-tl-sm'
-                }`}>
-                  {msg.content}
-                </div>
-              </div>
-            ))}
-            {loading && (
-              <div className="flex items-center gap-3 text-slate-500 p-4">
-                <Loader2 className="animate-spin" size={20} /> O Mestre está pensando...
-              </div>
-            )}
-            <div ref={chatEndRef} />
-          </div>
-
-          {/* TAB: INVENTORY */}
-          <div className={`${activeTab === 'inventory' ? 'block' : 'hidden'} max-w-4xl mx-auto`}>
-            <div className="flex justify-between items-end mb-6 border-b border-slate-800 pb-2">
-              <h2 className="text-2xl font-black text-emerald-500">Mochila</h2>
-              <span className="text-slate-500 text-sm">Capacidade: {inventory.items.length} / {inventory.limit}</span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {inventory.items.map(item => (
-                <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-lg p-4 hover:border-emerald-500/50 transition-colors group cursor-default">
-                  <div className="flex justify-between items-start mb-2">
-                    <h3 className="font-bold text-white group-hover:text-emerald-400">{item.name}</h3>
-                    <span className="text-xs uppercase bg-slate-800 text-slate-400 px-2 py-1 rounded">{item.type}</span>
-                  </div>
-                  <p className="text-sm text-slate-400 mb-2">{item.desc}</p>
-                  {item.damage && <div className="text-xs text-red-400 font-mono mt-2 flex items-center gap-1 bg-red-950/20 w-fit px-2 py-1 rounded"><Shield size={12}/> Dano: {item.damage}</div>}
-                  {item.content && (
-                    <button className="mt-3 text-xs text-blue-400 hover:text-blue-300 underline" onClick={() => alert(`Conteúdo do Documento:\n\n${item.content}`)}>
-                      Ler Documento
-                    </button>
-                  )}
-                </div>
-              ))}
-              {inventory.items.length === 0 && <p className="text-slate-600 italic">Sua mochila está vazia.</p>}
-            </div>
-          </div>
-
-          {/* TAB: NPCS */}
-          <div className={`${activeTab === 'npcs' ? 'block' : 'hidden'} max-w-4xl mx-auto`}>
-            <h2 className="text-2xl font-black text-purple-500 mb-6 border-b border-slate-800 pb-2">Registros de Contatos</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {npcs.map(npc => (
-                <div key={npc.id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
-                  <div className="flex p-4 gap-4 bg-slate-800/50 border-b border-slate-800">
-                    <div className="relative w-20 h-20 bg-slate-800 rounded-lg border border-slate-700 overflow-hidden shrink-0">
-                      {npc.image ? <img src={npc.image} alt={npc.name} className="w-full h-full object-cover" /> : <User className="w-full h-full p-4 text-slate-600" />}
-                      <label className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
-                        <Upload size={16} className="text-white" />
-                        <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e, npc.id)} />
-                      </label>
-                    </div>
-                    <div className="flex-1">
-                      <h3 className="font-bold text-lg text-white mb-1 flex items-center justify-between">
-                        {npc.name}
-                        <button onClick={() => generateNpcImage(npc.id, npc.appearance || 'A generic character', genre)} className="text-xs text-purple-400 border border-purple-900 bg-purple-950/30 px-2 py-1 rounded flex items-center gap-1 hover:bg-purple-900" title="Gerar Foto com IA">
-                          <ImageIcon size={12}/> Gerar
-                        </button>
-                      </h3>
-                      <div className="w-full bg-slate-800 h-2 rounded-full mt-2 relative overflow-hidden">
-                         {/* Barra de afinidade visual de -100 a 100 */}
-                        <div className={`absolute top-0 bottom-0 left-1/2 transition-all ${npc.affinity > 0 ? 'bg-emerald-500' : 'bg-red-500 right-1/2 origin-right'}`} style={{ width: `${Math.abs(npc.affinity || 0)}%`, [npc.affinity > 0 ? 'left' : 'right']: '50%' }}></div>
-                        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-slate-600"></div>
-                      </div>
-                      <div className="text-[10px] text-center mt-1 text-slate-500">Afinidade: {npc.affinity || 0}</div>
-                    </div>
-                  </div>
-                  <div className="p-4 space-y-3 text-sm flex-1 flex flex-col">
-                    <div>
-                      <label className="text-xs text-slate-500 uppercase font-bold block mb-1">Aparência</label>
-                      <textarea value={npc.appearance || ''} onChange={(e) => setNpcs(prev => prev.map(n => n.id === npc.id ? {...n, appearance: e.target.value} : n))} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-300 resize-none h-16 text-xs"></textarea>
-                    </div>
-                    <div>
-                      <label className="text-xs text-slate-500 uppercase font-bold block mb-1">Personalidade</label>
-                      <input type="text" value={npc.personality || ''} onChange={(e) => setNpcs(prev => prev.map(n => n.id === npc.id ? {...n, personality: e.target.value} : n))} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-300 text-xs" />
-                    </div>
-                    <p className="text-xs text-slate-400 mt-2 flex-1 italic">"{npc.backstory}"</p>
-                  </div>
-                </div>
-              ))}
-              {npcs.length === 0 && <p className="text-slate-600 italic col-span-2">Você ainda não formou vínculos significativos.</p>}
-            </div>
-          </div>
-
-          {/* TAB: MUSIC */}
-          <div className={`${activeTab === 'music' ? 'block' : 'hidden'} max-w-2xl mx-auto`}>
-            <h2 className="text-2xl font-black text-yellow-500 mb-2">Trilha Sonora Dinâmica</h2>
-            <p className="text-sm text-slate-400 mb-6 border-b border-slate-800 pb-4">Carregue arquivos de áudio do seu dispositivo para tocar durante diferentes momentos da campanha. (Aviso: As músicas não são exportadas no save, devem ser recarregadas a cada sessão).</p>
+    <!-- SCREENS -->
+    <!-- 1. Setup / Main Menu -->
+    <div id="screen-setup" class="absolute inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md">
+        <div class="hud-panel p-8 max-w-lg w-full flex flex-col gap-6">
+            <h1 class="text-4xl font-bold text-center text-sky-400 tracking-widest uppercase">Nexus RPG</h1>
             
-            <div className="space-y-4">
-              {[
-                { id: 'calmo', label: 'Ambiente Calmo / Explorando', icon: <MapPin size={18}/> },
-                { id: 'tensao', label: 'Tensão / Investigação', icon: <Brain size={18}/> },
-                { id: 'combate', label: 'Combate Padrão', icon: <Shield size={18}/> },
-                { id: 'boss', label: 'Luta contra Chefe', icon: <Zap size={18} className="text-red-500"/> }
-              ].map(track => (
-                <div key={track.id} className={`flex items-center justify-between p-4 rounded-lg border ${currentTrackName === track.id ? 'bg-yellow-900/20 border-yellow-500' : 'bg-slate-900 border-slate-800'}`}>
-                  <div className="flex items-center gap-3">
-                    <button onClick={() => playMusic(track.id)} className={`w-10 h-10 rounded-full flex items-center justify-center ${currentTrackName === track.id ? 'bg-yellow-500 text-slate-900' : 'bg-slate-800 text-white hover:bg-slate-700'}`}>
-                      {currentTrackName === track.id ? <Square size={16} fill="currentColor"/> : <Play size={16} fill="currentColor" className="ml-1"/>}
-                    </button>
-                    <div>
-                      <div className="font-bold text-sm flex items-center gap-2">{track.icon} {track.label}</div>
-                      <div className="text-xs text-slate-500">{musicTracks[track.id] ? 'Faixa carregada.' : 'Nenhuma faixa.'}</div>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-xs px-3 py-2 rounded text-slate-300 border border-slate-700">
-                      Upload
-                      <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleMusicUpload(track.id, e)} />
-                    </label>
-                  </div>
-                </div>
-              ))}
+            <div class="flex flex-col gap-2">
+                <label class="text-sky-300">Chave da API (Gemini):</label>
+                <input type="password" id="api-key-input" class="bg-black/50 border border-sky-900 rounded p-2 text-white focus:outline-none focus:border-sky-400" placeholder="AIzaSy...">
+                <p class="text-xs text-gray-400">Necessária para rodar o mestre de jogo. Obtenha no Google AI Studio.</p>
             </div>
-          </div>
 
-          {/* TAB: SETTINGS */}
-          <div className={`${activeTab === 'settings' ? 'block' : 'hidden'} max-w-xl mx-auto space-y-6`}>
-            <h2 className="text-2xl font-black text-slate-300 mb-6 border-b border-slate-800 pb-2">Sistema</h2>
+            <div class="flex gap-4">
+                <button onclick="startGameSetup()" class="flex-1 bg-sky-600 hover:bg-sky-500 text-white py-3 rounded font-bold transition-colors">NOVA CAMPANHA</button>
+                <button onclick="document.getElementById('import-save').click()" class="flex-1 border border-sky-600 hover:bg-sky-900 text-sky-400 py-3 rounded font-bold transition-colors">CARREGAR SAVE</button>
+                <input type="file" id="import-save" class="hidden" accept=".json" onchange="importSave(event)">
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. Campaign Setup -->
+    <div id="screen-campaign" class="absolute inset-0 z-40 hidden flex items-center justify-center bg-black/90 backdrop-blur-md">
+        <div class="hud-panel p-8 max-w-2xl w-full h-[80vh] overflow-y-auto flex flex-col gap-6">
+            <h2 class="text-2xl font-bold text-sky-400 border-b border-sky-900 pb-2">Configuração da Campanha</h2>
             
-            <div className="bg-slate-900 p-4 rounded-lg border border-slate-800">
-              <h3 className="font-bold text-sm mb-2 text-slate-400">Gemini API Key</h3>
-              <input type="password" value={apiKeyInput} onChange={e => setApiKeyInput(e.target.value)} placeholder="Cole sua chave aqui..." className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white font-mono text-sm" />
-              <p className="text-xs text-slate-500 mt-2">Necessária para a IA funcionar se você jogar o arquivo fora deste ambiente.</p>
+            <div class="grid grid-cols-2 gap-4">
+                <button onclick="setCampaignMode('original')" id="btn-mode-orig" class="p-4 border border-sky-600 rounded hover:bg-sky-900 text-center">Original (Rápido)</button>
+                <button onclick="setCampaignMode('custom')" id="btn-mode-cust" class="p-4 border border-gray-600 rounded hover:bg-gray-800 text-center">Personalizada (Detalhada)</button>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
-              <button onClick={saveGame} className="flex items-center justify-center gap-2 bg-blue-900/30 hover:bg-blue-800/50 text-blue-400 border border-blue-900 p-4 rounded-lg font-bold transition-all">
-                <Save size={18}/> Salvar Local
-              </button>
-              <button onClick={loadGame} className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 p-4 rounded-lg font-bold transition-all">
-                <Upload size={18}/> Carregar Local
-              </button>
-              <button onClick={exportGame} className="flex items-center justify-center gap-2 bg-purple-900/30 hover:bg-purple-800/50 text-purple-400 border border-purple-900 p-4 rounded-lg font-bold transition-all">
-                <Download size={18}/> Exportar Save
-              </button>
-              <label className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 p-4 rounded-lg font-bold cursor-pointer transition-all">
-                <Upload size={18}/> Importar Save
-                <input type="file" accept=".json" className="hidden" onChange={importGame} />
-              </label>
+            <div id="campaign-details" class="flex flex-col gap-4">
+                <div>
+                    <label class="text-sky-300">Gênero:</label>
+                    <input type="text" id="camp-genre" placeholder="Ex: Cyberpunk, Fantasia Sombria, Terror Cósmico..." class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1">
+                </div>
+                <div id="custom-camp-fields" class="hidden flex-col gap-4">
+                    <div>
+                        <label class="text-sky-300">Universo / Lore (Opcional):</label>
+                        <textarea id="camp-universe" rows="3" placeholder="Descreva o mundo, regras mágicas, política..." class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1"></textarea>
+                    </div>
+                    <div>
+                        <label class="text-sky-300">NPCs Conhecidos (Opcional):</label>
+                        <textarea id="camp-npcs" rows="2" placeholder="Ex: O Rei Louco governa o norte..." class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1"></textarea>
+                    </div>
+                </div>
             </div>
 
-            <div className="bg-slate-900 p-4 rounded-lg border border-red-900/50 mt-8">
-              <button onClick={() => { if(window.confirm('Tem certeza? Todo o progresso não salvo será perdido.')) setGameState('menu'); }} className="text-red-500 hover:text-red-400 font-bold text-sm w-full text-left">
-                Sair para o Menu Principal
-              </button>
+            <h2 class="text-2xl font-bold text-sky-400 border-b border-sky-900 pb-2 mt-4">Criação de Personagem</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                    <label class="text-sky-300">Nome:</label>
+                    <input type="text" id="char-name" class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1">
+                </div>
+                <div>
+                    <label class="text-sky-300">Raça/Espécie:</label>
+                    <input type="text" id="char-race" class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1">
+                </div>
+                <div>
+                    <label class="text-sky-300">Classe/Profissão:</label>
+                    <input type="text" id="char-class" class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1">
+                </div>
+                <div>
+                    <label class="text-sky-300">Foto (Opcional):</label>
+                    <input type="file" accept="image/*" id="char-img-input" class="w-full bg-black/50 border border-sky-900 rounded p-1.5 text-white mt-1 text-sm">
+                </div>
             </div>
-          </div>
+            <div>
+                <label class="text-sky-300">História de Fundo:</label>
+                <textarea id="char-bg" rows="3" class="w-full bg-black/50 border border-sky-900 rounded p-2 text-white mt-1"></textarea>
+            </div>
 
+            <button onclick="initializeGame()" class="bg-sky-600 hover:bg-sky-500 text-white py-3 rounded font-bold mt-4 shadow-[0_0_15px_rgba(56,189,248,0.4)]">GERAR STATUS E INICIAR</button>
         </div>
-      </div>
+    </div>
 
-      {/* BOTTOM INPUT BAR (Sempre visível se na aba Story) */}
-      <div className={`h-auto md:h-24 bg-slate-900 border-t border-slate-800 p-2 md:p-4 shrink-0 transition-transform duration-300 ${activeTab !== 'story' ? 'translate-y-full absolute bottom-0 left-0 right-0 md:static md:translate-y-0' : 'relative z-10'}`}>
-        <div className="max-w-4xl mx-auto flex flex-col md:flex-row gap-2 h-full">
-          <div className="flex bg-slate-950 rounded-lg overflow-hidden border border-slate-700 shrink-0 h-10 md:h-full">
-            <button onClick={() => setInputMode('acao')} className={`px-3 md:px-4 text-xs md:text-sm font-bold transition-colors ${inputMode === 'acao' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>Ação</button>
-            <button onClick={() => setInputMode('fala')} className={`px-3 md:px-4 text-xs md:text-sm font-bold transition-colors border-l border-r border-slate-800 ${inputMode === 'fala' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>Fala</button>
-            <button onClick={() => setInputMode('descricao')} className={`px-3 md:px-4 text-xs md:text-sm font-bold transition-colors ${inputMode === 'descricao' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>Mestre?</button>
-          </div>
-          <div className="flex-1 flex gap-2">
-            <input 
-              type="text" 
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAction()}
-              placeholder={inputMode === 'acao' ? 'O que você faz?' : inputMode === 'fala' ? 'O que você diz?' : 'O que você quer investigar/saber?'}
-              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 text-white focus:outline-none focus:border-blue-500 h-12 md:h-full"
-            />
-            <button onClick={handleAction} disabled={loading || !inputText.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white w-12 md:w-16 rounded-lg flex items-center justify-center shrink-0 h-12 md:h-full transition-colors">
-              <Send size={20} className={inputText.trim() ? 'ml-1' : ''} />
-            </button>
-          </div>
+    <!-- 3. MAIN HUD -->
+    <div id="screen-game" class="hidden flex-1 flex flex-col md:flex-row h-full w-full p-2 gap-2">
+        
+        <!-- Left Column: Player & Context -->
+        <div class="w-full md:w-1/4 flex flex-col gap-2 h-full">
+            
+            <!-- Player Card -->
+            <div class="hud-panel p-4 flex flex-col gap-3">
+                <div class="flex items-center gap-4">
+                    <div class="w-16 h-16 rounded border-2 border-sky-500 overflow-hidden bg-gray-800 flex-shrink-0">
+                        <img id="hud-player-img" src="" alt="Player" class="w-full h-full object-cover hidden">
+                        <i id="hud-player-icon" class="fas fa-user text-3xl text-gray-500 m-auto mt-3 block text-center"></i>
+                    </div>
+                    <div>
+                        <h3 id="hud-name" class="font-bold text-lg text-white leading-tight">Nome</h3>
+                        <p id="hud-class" class="text-xs text-sky-400">Raça - Classe</p>
+                    </div>
+                </div>
+
+                <!-- Stats -->
+                <div class="flex flex-col gap-1.5 text-xs font-bold">
+                    <div class="flex justify-between items-center">
+                        <span class="text-red-400">VIDA (HP)</span>
+                        <span id="hud-hp-val">100/100</span>
+                    </div>
+                    <div class="status-bar-bg h-2 rounded-full overflow-hidden">
+                        <div id="hud-hp-bar" class="bar-fill h-full bg-red-500" style="width: 100%"></div>
+                    </div>
+
+                    <div class="flex justify-between items-center mt-1">
+                        <span class="text-purple-400">SANIDADE</span>
+                        <span id="hud-san-val">100/100</span>
+                    </div>
+                    <div class="status-bar-bg h-2 rounded-full overflow-hidden">
+                        <div id="hud-san-bar" class="bar-fill h-full bg-purple-500" style="width: 100%"></div>
+                    </div>
+
+                    <div class="flex justify-between items-center mt-1">
+                        <span class="text-yellow-400">ESFORÇO</span>
+                        <span id="hud-stm-val">50/50</span>
+                    </div>
+                    <div class="status-bar-bg h-2 rounded-full overflow-hidden">
+                        <div id="hud-stm-bar" class="bar-fill h-full bg-yellow-500" style="width: 100%"></div>
+                    </div>
+
+                    <div class="flex justify-between items-center mt-1">
+                        <span class="text-blue-400">EXP</span>
+                        <span id="hud-exp-val">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Context Card (Location & Party) -->
+            <div class="hud-panel p-4 flex flex-col gap-2">
+                <h4 class="text-xs text-gray-400 uppercase tracking-widest border-b border-gray-700 pb-1"><i class="fas fa-map-marker-alt text-sky-400 mr-2"></i>Localização</h4>
+                <p id="hud-location" class="text-sky-300 font-semibold text-sm">Desconhecido</p>
+                
+                <h4 class="text-xs text-gray-400 uppercase tracking-widest border-b border-gray-700 pb-1 mt-2"><i class="fas fa-users text-sky-400 mr-2"></i>Grupo Atual</h4>
+                <ul id="hud-party" class="text-sm text-gray-300 list-disc list-inside">
+                    <li class="italic text-gray-500">Sozinho</li>
+                </ul>
+            </div>
+
+            <!-- Side Menu Tabs -->
+            <div class="hud-panel flex-1 flex flex-col overflow-hidden">
+                <div class="flex border-b border-gray-700 text-xs font-bold uppercase">
+                    <button onclick="switchTab('inventory')" id="tab-inventory" class="tab-btn active flex-1 py-3 hover:bg-white/5 transition">Inventário</button>
+                    <button onclick="switchTab('relationships')" id="tab-relationships" class="tab-btn flex-1 py-3 hover:bg-white/5 transition">NPCs</button>
+                    <button onclick="switchTab('system')" id="tab-system" class="tab-btn flex-1 py-3 hover:bg-white/5 transition">Sistema</button>
+                </div>
+                
+                <div id="tab-content" class="p-3 flex-1 overflow-y-auto terminal-text text-sm">
+                    <!-- Dynamic Content goes here based on selected tab -->
+                </div>
+            </div>
         </div>
-      </div>
+
+        <!-- Right Column: Story & Interaction -->
+        <div class="w-full md:w-3/4 flex flex-col gap-2 h-full">
+            
+            <!-- Story Area -->
+            <div class="hud-panel flex-1 p-4 md:p-6 overflow-y-auto flex flex-col gap-4 relative" id="story-container">
+                <div id="story-log" class="flex flex-col gap-4 pb-10">
+                    <!-- Chat logs appear here -->
+                </div>
+                <div id="loading-indicator" class="hidden absolute bottom-4 left-6 flex items-center gap-2 text-sky-400 font-bold loading-pulse bg-black/80 px-4 py-2 rounded-full border border-sky-900">
+                    <i class="fas fa-circle-notch fa-spin"></i> Processando IA...
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="hud-panel p-3 flex flex-col md:flex-row gap-2 items-stretch">
+                <select id="action-type" class="bg-black/60 border border-sky-800 text-sky-300 p-3 rounded font-bold uppercase tracking-wide focus:outline-none focus:border-sky-400 md:w-32">
+                    <option value="acao">Ação</option>
+                    <option value="fala">Fala</option>
+                    <option value="descricao">Analisar</option>
+                </select>
+                
+                <textarea id="player-input" rows="1" class="flex-1 bg-black/60 border border-gray-700 text-white p-3 rounded resize-none focus:outline-none focus:border-sky-400 terminal-text" placeholder="O que você faz?..." onkeydown="handleEnter(event)"></textarea>
+                
+                <button onclick="submitAction()" class="bg-sky-600 hover:bg-sky-500 text-white px-6 py-3 rounded font-bold transition flex items-center justify-center gap-2">
+                    <i class="fas fa-paper-plane"></i> <span class="hidden md:inline">Enviar</span>
+                </button>
+            </div>
+        </div>
 
     </div>
-  );
-};
 
-export default App;
+    <!-- Modals & Overlays -->
+    <div id="modal-overlay" class="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm hidden flex items-center justify-center p-4">
+        <!-- Content injected by JS -->
+    </div>
+
+    <!-- Hidden Audio Elements -->
+    <audio id="bgm-player" loop></audio>
+
+    <script>
+        // --- 1. STATE MANAGEMENT ---
+        let apiKey = '';
+        let campaignMode = 'original';
+        let currentTab = 'inventory';
+        let isProcessing = false;
+        
+        let gameState = {
+            player: {
+                name: '', race: '', class: '', background: '', imgBase64: null,
+                stats: { hp: 100, maxHp: 100, sanity: 100, maxSanity: 100, stamina: 50, maxStamina: 50, exp: 0 },
+                attributes: {}, // Generated by AI
+                skills: []
+            },
+            campaign: { genre: '', universe: '', npcs: '' },
+            context: { location: 'Ponto de Partida', party: [] },
+            inventory: { maxWeight: 50, items: [] },
+            relationships: [],
+            history: [], // Text log for display
+            systemLog: [], // Condensed history for the AI prompt
+        };
+
+        let audioTracks = {
+            calm: null, combat: null, boss: null, tension: null, investigation: null
+        };
+        let currentMood = 'calm';
+
+        // --- 2. INITIALIZATION & SETUP ---
+
+        function setCampaignMode(mode) {
+            campaignMode = mode;
+            document.getElementById('btn-mode-orig').className = mode === 'original' ? 'p-4 border border-sky-400 rounded bg-sky-900 text-center font-bold' : 'p-4 border border-gray-600 rounded hover:bg-gray-800 text-center text-gray-400';
+            document.getElementById('btn-mode-cust').className = mode === 'custom' ? 'p-4 border border-sky-400 rounded bg-sky-900 text-center font-bold' : 'p-4 border border-gray-600 rounded hover:bg-gray-800 text-center text-gray-400';
+            
+            document.getElementById('custom-camp-fields').style.display = mode === 'custom' ? 'flex' : 'none';
+        }
+
+        function startGameSetup() {
+            apiKey = document.getElementById('api-key-input').value.trim();
+            if (!apiKey) { alert("Por favor, insira a chave da API do Gemini."); return; }
+            document.getElementById('screen-setup').classList.add('hidden');
+            document.getElementById('screen-campaign').classList.remove('hidden');
+            setCampaignMode('original');
+        }
+
+        async function handleImageUpload(fileInputId) {
+            const file = document.getElementById(fileInputId).files[0];
+            if (!file) return null;
+            return new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    // Basic compression via canvas could go here to save localStorage space.
+                    // For simplicity, returning the raw base64. Keep images small!
+                    resolve(e.target.result); 
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+
+        async function initializeGame() {
+            const btn = event.target;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Gerando Personagem...';
+            btn.disabled = true;
+
+            // Gather inputs
+            gameState.campaign.genre = document.getElementById('camp-genre').value || 'Fantasia Genérica';
+            if (campaignMode === 'custom') {
+                gameState.campaign.universe = document.getElementById('camp-universe').value;
+                gameState.campaign.npcs = document.getElementById('camp-npcs').value;
+            }
+
+            gameState.player.name = document.getElementById('char-name').value || 'Aventureiro';
+            gameState.player.race = document.getElementById('char-race').value || 'Humano';
+            gameState.player.class = document.getElementById('char-class').value || 'Andarilho';
+            gameState.player.background = document.getElementById('char-bg').value;
+            gameState.player.imgBase64 = await handleImageUpload('char-img-input');
+
+            // Call AI to generate initial stats, skills and starting items based on the input
+            const initPrompt = `
+                Você é o motor de um RPG de mesa virtual. Crie os dados iniciais do personagem baseado nas seguintes informações:
+                Gênero: ${gameState.campaign.genre}
+                Nome: ${gameState.player.name}, Raça: ${gameState.player.race}, Classe: ${gameState.player.class}
+                História: ${gameState.player.background}
+
+                Retorne ESTRITAMENTE um objeto JSON válido com a seguinte estrutura:
+                {
+                    "attributes": { "Força": numero (1-20), "Agilidade": numero, "Inteligência": numero, "Carisma": numero },
+                    "skills": ["Habilidade 1 com breve descrição", "Habilidade 2", "Habilidade 3"],
+                    "startingItems": [ {"name": "Arma base", "desc": "Dano 1d6", "weight": 2, "type": "weapon"}, {"name": "Item utilitário", "desc": "Efeito", "weight": 1, "type": "item"} ],
+                    "introNarrative": "Um parágrafo inicial épico introduzindo o personagem no mundo e dando a ele a primeira situação/lugar em que se encontra.",
+                    "startingLocation": "Nome do local inicial"
+                }
+            `;
+
+            try {
+                const aiData = await callGemini(initPrompt, true);
+                
+                gameState.player.attributes = aiData.attributes;
+                gameState.player.skills = aiData.skills;
+                gameState.inventory.items = aiData.startingItems;
+                gameState.context.location = aiData.startingLocation;
+
+                // Move to Game Screen
+                document.getElementById('screen-campaign').classList.add('hidden');
+                document.getElementById('screen-game').classList.remove('hidden');
+                
+                updateHUD();
+                renderTab();
+                addStoryEntry('system', aiData.introNarrative);
+                saveGame();
+
+            } catch (error) {
+                console.error(error);
+                alert("Erro ao gerar personagem. Verifique a chave da API e tente novamente.");
+                btn.innerHTML = 'GERAR STATUS E INICIAR';
+                btn.disabled = false;
+            }
+        }
+
+        // --- 3. UI & HUD UPDATES ---
+
+        function updateHUD() {
+            const p = gameState.player;
+            document.getElementById('hud-name').textContent = p.name;
+            document.getElementById('hud-class').textContent = `${p.race} - ${p.class}`;
+            
+            if (p.imgBase64) {
+                document.getElementById('hud-player-img').src = p.imgBase64;
+                document.getElementById('hud-player-img').classList.remove('hidden');
+                document.getElementById('hud-player-icon').classList.add('hidden');
+            }
+
+            const updateBar = (id, val, max) => {
+                document.getElementById(`hud-${id}-val`).textContent = `${val}/${max}`;
+                document.getElementById(`hud-${id}-bar`).style.width = `${Math.max(0, Math.min(100, (val/max)*100))}%`;
+            };
+
+            updateBar('hp', p.stats.hp, p.stats.maxHp);
+            updateBar('san', p.stats.sanity, p.stats.maxSanity);
+            updateBar('stm', p.stats.stamina, p.stats.maxStamina);
+            document.getElementById('hud-exp-val').textContent = p.stats.exp;
+
+            document.getElementById('hud-location').textContent = gameState.context.location;
+            
+            const partyList = document.getElementById('hud-party');
+            if (gameState.context.party.length === 0) {
+                partyList.innerHTML = '<li class="italic text-gray-500">Sozinho</li>';
+            } else {
+                partyList.innerHTML = gameState.context.party.map(npc => `<li>${npc}</li>`).join('');
+            }
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`tab-${tab}`).classList.add('active');
+            renderTab();
+        }
+
+        function renderTab() {
+            const container = document.getElementById('tab-content');
+            container.innerHTML = '';
+
+            if (currentTab === 'inventory') {
+                let currentWeight = gameState.inventory.items.reduce((sum, item) => sum + (item.weight || 0), 0);
+                
+                let html = `<div class="flex justify-between text-gray-400 mb-4 border-b border-gray-700 pb-2">
+                                <span>Capacidade:</span>
+                                <span class="${currentWeight > gameState.inventory.maxWeight ? 'text-red-400' : 'text-sky-400'}">${currentWeight} / ${gameState.inventory.maxWeight} kg</span>
+                            </div>
+                            <div class="flex flex-col gap-2">`;
+                
+                if (gameState.inventory.items.length === 0) html += `<p class="text-gray-500 italic">Inventário vazio.</p>`;
+                
+                gameState.inventory.items.forEach((item, index) => {
+                    let icon = item.type === 'weapon' ? 'fa-khanda' : item.type === 'document' ? 'fa-scroll' : 'fa-box';
+                    html += `
+                        <div class="bg-black/40 border border-gray-700 p-2 rounded flex items-start gap-3 hover:border-sky-800 transition">
+                            <i class="fas ${icon} text-gray-400 mt-1"></i>
+                            <div class="flex-1">
+                                <h5 class="font-bold text-sky-300">${item.name} <span class="text-xs text-gray-500 font-normal">(${item.weight}kg)</span></h5>
+                                <p class="text-xs text-gray-400">${item.desc}</p>
+                            </div>
+                        </div>`;
+                });
+                html += `</div>`;
+                container.innerHTML = html;
+
+            } else if (currentTab === 'relationships') {
+                let html = `<button onclick="openNPCModal()" class="w-full bg-black/40 border border-dashed border-sky-800 text-sky-400 p-2 rounded mb-4 hover:bg-sky-900/30">+ Adicionar NPC Manualmente</button>
+                            <div class="flex flex-col gap-3">`;
+                
+                if (gameState.relationships.length === 0) html += `<p class="text-gray-500 italic">Nenhum relacionamento notável ainda.</p>`;
+
+                gameState.relationships.forEach((npc, idx) => {
+                    let statusColor = npc.affinity > 50 ? 'bg-green-500' : npc.affinity < -50 ? 'bg-red-500' : 'bg-gray-400';
+                    html += `
+                        <div class="bg-black/40 border border-gray-700 p-3 rounded flex items-center gap-3 cursor-pointer hover:border-sky-500" onclick="openNPCModal(${idx})">
+                            <div class="w-10 h-10 rounded-full bg-gray-800 flex-shrink-0 overflow-hidden border border-gray-600">
+                                ${npc.img ? `<img src="${npc.img}" class="w-full h-full object-cover">` : `<i class="fas fa-user text-gray-500 m-auto mt-2 block text-center"></i>`}
+                            </div>
+                            <div class="flex-1">
+                                <h5 class="font-bold text-white text-sm">${npc.name}</h5>
+                                <div class="w-full bg-gray-800 h-1 mt-1 rounded-full overflow-hidden">
+                                    <div class="${statusColor} h-full" style="width: ${Math.abs(npc.affinity)}%; margin-left: ${npc.affinity < 0 ? 0 : 50}%; margin-right: ${npc.affinity > 0 ? 0 : 50}%"></div>
+                                </div>
+                            </div>
+                        </div>`;
+                });
+                html += `</div>`;
+                container.innerHTML = html;
+
+            } else if (currentTab === 'system') {
+                container.innerHTML = `
+                    <div class="flex flex-col gap-4">
+                        <div class="border border-gray-700 p-3 rounded bg-black/40">
+                            <h4 class="text-sky-400 font-bold mb-2"><i class="fas fa-save mr-2"></i>Progresso</h4>
+                            <div class="flex gap-2">
+                                <button onclick="saveGame(true)" class="flex-1 bg-sky-800 hover:bg-sky-700 text-white text-xs py-2 rounded">Salvar (Local)</button>
+                                <button onclick="exportSave()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-xs py-2 rounded">Exportar JSON</button>
+                            </div>
+                        </div>
+
+                        <div class="border border-gray-700 p-3 rounded bg-black/40">
+                            <h4 class="text-sky-400 font-bold mb-2"><i class="fas fa-music mr-2"></i>Trilha Sonora</h4>
+                            <p class="text-xs text-gray-400 mb-2">Faça upload de músicas para situações do jogo. A IA as acionará automaticamente.</p>
+                            ${['calm', 'combat', 'tension', 'investigation'].map(mood => `
+                                <div class="flex justify-between items-center mb-1 bg-black/30 p-1 rounded">
+                                    <span class="text-xs capitalize w-20 text-gray-300">${mood}</span>
+                                    <input type="file" accept="audio/*" class="text-xs w-40 text-gray-500" onchange="loadAudio(event, '${mood}')">
+                                </div>
+                            `).join('')}
+                        </div>
+
+                        <div class="border border-gray-700 p-3 rounded bg-black/40">
+                            <h4 class="text-sky-400 font-bold mb-2"><i class="fas fa-book-open mr-2"></i>Atributos & Skills</h4>
+                            <div class="grid grid-cols-2 gap-2 text-xs mb-2">
+                                ${Object.entries(gameState.player.attributes).map(([k, v]) => `<div><span class="text-gray-400">${k}:</span> <span class="text-white">${v}</span></div>`).join('')}
+                            </div>
+                            <h5 class="text-gray-400 text-xs mb-1 border-t border-gray-700 pt-2">Habilidades:</h5>
+                            <ul class="text-xs text-sky-200 list-disc list-inside">
+                                ${gameState.player.skills.map(s => `<li>${s}</li>`).join('')}
+                            </ul>
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // --- 4. GAME LOGIC & AI INTEGRATION ---
+
+        function addStoryEntry(role, text, actionType = '') {
+            const log = document.getElementById('story-log');
+            const entry = document.createElement('div');
+            
+            if (role === 'player') {
+                let badgeColor = actionType === 'acao' ? 'bg-red-900 text-red-200' : actionType === 'fala' ? 'bg-blue-900 text-blue-200' : 'bg-green-900 text-green-200';
+                entry.className = "flex justify-end mb-2";
+                entry.innerHTML = `
+                    <div class="max-w-[85%] bg-gray-800 border border-gray-600 p-3 rounded-tl-xl rounded-tr-xl rounded-bl-xl shadow-lg relative">
+                        <span class="absolute -top-2 -right-2 text-[10px] uppercase font-bold px-2 py-0.5 rounded ${badgeColor}">${actionType}</span>
+                        <p class="text-gray-200 text-sm md:text-base">${text}</p>
+                    </div>`;
+            } else {
+                // AI / System
+                entry.className = "flex justify-start mb-2";
+                entry.innerHTML = `
+                    <div class="max-w-[95%] bg-black/50 border-l-2 border-sky-500 p-4 rounded shadow-lg text-gray-300 text-sm md:text-base leading-relaxed">
+                        ${text.replace(/\n/g, '<br>')}
+                    </div>`;
+            }
+
+            log.appendChild(entry);
+            document.getElementById('story-container').scrollTop = document.getElementById('story-container').scrollHeight;
+            
+            // Save to history (keep history small for display purposes if needed, but we keep all here)
+            gameState.history.push({role, text, actionType});
+        }
+
+        function handleEnter(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitAction();
+            }
+        }
+
+        async function submitAction() {
+            const inputEl = document.getElementById('player-input');
+            const typeEl = document.getElementById('action-type');
+            const text = inputEl.value.trim();
+
+            if (!text || isProcessing) return;
+
+            const actionType = typeEl.value;
+            inputEl.value = '';
+            
+            addStoryEntry('player', text, actionType);
+            document.getElementById('loading-indicator').classList.remove('hidden');
+            isProcessing = true;
+
+            // Build Context for AI
+            const recentHistory = gameState.history.slice(-6).map(h => `${h.role === 'player' ? `Jogador (${h.actionType})` : 'Mestre'}: ${h.text}`).join('\n');
+            
+            // Compress state for prompt
+            const minifiedState = {
+                hp: gameState.player.stats.hp,
+                sanity: gameState.player.stats.sanity,
+                items: gameState.inventory.items.map(i=>i.name).join(', '),
+                location: gameState.context.location,
+                party: gameState.context.party.join(', ')
+            };
+
+            const prompt = `
+                Você é o Mestre do Jogo (IA) de um RPG.
+                Contexto do Mundo: Gênero ${gameState.campaign.genre}. ${gameState.campaign.universe}
+                Estado Atual do Jogador: ${JSON.stringify(minifiedState)}
+                
+                Últimas interações:
+                ${recentHistory}
+                
+                Instruções Estritas:
+                1. Analise a ação do jogador e continue a narrativa. Descreva as consequências.
+                2. Se houver combate ou dano, modifique o "hp_change".
+                3. Se houver medo/terror, modifique "sanity_change".
+                4. Se achar um item, adicione na lista de "new_items". Se perder, em "lost_items".
+                5. Atualize a "location" apenas se o jogador viajar.
+                6. Escolha um "mood" apropriado (calm, combat, tension, investigation) baseado na cena atual.
+
+                RETORNE APENAS UM JSON VÁLIDO. Nenhuma palavra fora do JSON. Formato:
+                {
+                    "narrative": "Texto da sua narração...",
+                    "hp_change": numero (positivo cura, negativo dano, 0 nada),
+                    "sanity_change": numero,
+                    "exp_gain": numero,
+                    "location": "Nome do Local Atualizado",
+                    "party_updates": ["Lista de nomes de quem está com o jogador agora"],
+                    "new_items": [{"name": "Nome", "desc": "Desc", "weight": 1, "type": "item/weapon/document"}],
+                    "lost_items": ["Nome do item a remover"],
+                    "mood": "calm"
+                }
+            `;
+
+            try {
+                const aiResponse = await callGemini(prompt, true);
+                
+                // Process AI Updates
+                applyAIUpdates(aiResponse);
+                
+                // Display Narrative
+                addStoryEntry('system', aiResponse.narrative);
+
+            } catch (error) {
+                console.error("AI Error:", error);
+                addStoryEntry('system', "[[ERRO DE CONEXÃO NEURAL: Falha ao contatar a IA. Tente novamente.]]");
+            } finally {
+                document.getElementById('loading-indicator').classList.add('hidden');
+                isProcessing = false;
+                saveGame();
+            }
+        }
+
+        function applyAIUpdates(data) {
+            const p = gameState.player.stats;
+            
+            if (data.hp_change) p.hp = Math.max(0, Math.min(p.maxHp, p.hp + data.hp_change));
+            if (data.sanity_change) p.sanity = Math.max(0, Math.min(p.maxSanity, p.sanity + data.sanity_change));
+            if (data.exp_gain) p.exp += data.exp_gain;
+            
+            if (data.location) gameState.context.location = data.location;
+            if (data.party_updates) gameState.context.party = data.party_updates;
+
+            if (data.new_items && data.new_items.length > 0) {
+                gameState.inventory.items.push(...data.new_items);
+            }
+            if (data.lost_items && data.lost_items.length > 0) {
+                gameState.inventory.items = gameState.inventory.items.filter(i => !data.lost_items.includes(i.name));
+            }
+
+            // Handle Audio Mood
+            if (data.mood && audioTracks[data.mood] && currentMood !== data.mood) {
+                playAudio(data.mood);
+            }
+
+            updateHUD();
+            if(currentTab === 'inventory') renderTab();
+            
+            // Death check
+            if (p.hp <= 0) {
+                setTimeout(() => addStoryEntry('system', "Você sucumbiu aos seus ferimentos. A escuridão te abraça... [FIM DE JOGO]"), 1000);
+            }
+        }
+
+        // --- 5. UTILITIES (API, Audio, Storage, Modals) ---
+
+        async function callGemini(promptText, expectJson = false) {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            
+            const payload = {
+                contents: [{ parts: [{ text: promptText }] }],
+            };
+
+            if (expectJson) {
+                payload.generationConfig = { responseMimeType: "application/json" };
+            }
+
+            // Simple retry logic
+            let retries = 3;
+            while(retries > 0) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    
+                    const result = await response.json();
+                    const textOutput = result.candidates[0].content.parts[0].text;
+                    
+                    return expectJson ? JSON.parse(textOutput) : textOutput;
+                } catch (e) {
+                    console.warn("API call failed, retrying...", e);
+                    retries--;
+                    if(retries === 0) throw e;
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+            }
+        }
+
+        // Audio System
+        function loadAudio(event, mood) {
+            const file = event.target.files[0];
+            if (file) {
+                const url = URL.createObjectURL(file);
+                audioTracks[mood] = url;
+            }
+        }
+
+        function playAudio(mood) {
+            const player = document.getElementById('bgm-player');
+            if (audioTracks[mood]) {
+                player.src = audioTracks[mood];
+                player.play().catch(e => console.log("Navegador bloqueou autoplay de áudio.", e));
+                currentMood = mood;
+            }
+        }
+
+        // Save System
+        function saveGame(notify = false) {
+            try {
+                // To save space, we might limit history length in localStorage, but let's try full state first
+                localStorage.setItem('nexus_rpg_save', JSON.stringify(gameState));
+                if (notify) alert("Jogo salvo com sucesso!");
+            } catch (e) {
+                console.error("Erro ao salvar. Pode ser limite de armazenamento (imagens muito grandes).", e);
+                if (notify) alert("Erro ao salvar. Limite de cache excedido.");
+            }
+        }
+
+        function importSave(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const loadedState = JSON.parse(e.target.result);
+                    gameState = loadedState;
+                    
+                    document.getElementById('screen-setup').classList.add('hidden');
+                    document.getElementById('screen-game').classList.remove('hidden');
+                    
+                    // Rebuild UI
+                    updateHUD();
+                    renderTab();
+                    
+                    const log = document.getElementById('story-log');
+                    log.innerHTML = '';
+                    gameState.history.forEach(entry => addStoryEntry(entry.role, entry.text, entry.actionType));
+                    
+                    alert("Save carregado!");
+                } catch (err) {
+                    alert("Arquivo de save inválido.");
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function exportSave() {
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(gameState));
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            downloadAnchorNode.setAttribute("download", "nexus_save.json");
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        }
+
+        // NPC Modal System
+        function openNPCModal(index = -1) {
+            const modal = document.getElementById('modal-overlay');
+            let npc = index >= 0 ? gameState.relationships[index] : { name: '', desc: '', affinity: 0, img: null };
+            
+            modal.innerHTML = `
+                <div class="hud-panel p-6 w-full max-w-md flex flex-col gap-4">
+                    <h3 class="text-xl font-bold text-sky-400 border-b border-gray-700 pb-2">${index >= 0 ? 'Editar NPC' : 'Novo NPC'}</h3>
+                    
+                    <div>
+                        <label class="text-xs text-gray-400">Nome:</label>
+                        <input type="text" id="npc-name" value="${npc.name}" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-400">Afinidade (-100 a 100):</label>
+                        <input type="number" id="npc-affinity" value="${npc.affinity}" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-400">Descrição / Personalidade:</label>
+                        <textarea id="npc-desc" rows="3" class="w-full bg-black/50 border border-gray-700 rounded p-2 text-white text-sm">${npc.desc}</textarea>
+                    </div>
+                    <div class="flex gap-2 mt-4">
+                        <button onclick="saveNPC(${index})" class="flex-1 bg-sky-600 text-white py-2 rounded">Salvar</button>
+                        <button onclick="document.getElementById('modal-overlay').classList.add('hidden')" class="flex-1 border border-gray-600 text-gray-300 py-2 rounded">Cancelar</button>
+                    </div>
+                </div>
+            `;
+            modal.classList.remove('hidden');
+        }
+
+        function saveNPC(index) {
+            const name = document.getElementById('npc-name').value;
+            const affinity = parseInt(document.getElementById('npc-affinity').value) || 0;
+            const desc = document.getElementById('npc-desc').value;
+
+            if(!name) return;
+
+            const npcObj = { name, affinity, desc, img: null }; // Manual image upload for NPCs skipped to save cache space, relying on icons.
+
+            if (index >= 0) {
+                gameState.relationships[index] = npcObj;
+            } else {
+                gameState.relationships.push(npcObj);
+            }
+
+            document.getElementById('modal-overlay').classList.add('hidden');
+            renderTab();
+            saveGame();
+        }
+
+        // Run setup check on load
+        window.onload = () => {
+            const saved = localStorage.getItem('nexus_rpg_save');
+            if (saved) {
+                // Show hint that a save exists
+                const btn = document.querySelector('button[onclick="document.getElementById(\'import-save\').click()"]');
+                btn.classList.remove('border-sky-600', 'text-sky-400');
+                btn.classList.add('bg-green-800', 'text-white', 'border-green-600');
+                btn.innerHTML = 'HÁ UM SAVE NO CACHE (IMPORTAR)';
+            }
+        };
+
+    </script>
+</body>
+</html>
