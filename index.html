@@ -1,723 +1,725 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IA RPG Narrativo</title>
-    
-    <!-- React & ReactDOM -->
-    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    
-    <!-- Babel for JSX -->
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-    
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+import React, { useState, useEffect, useRef } from 'react';
+import { User, Heart, Brain, Zap, Shield, MapPin, Users, Settings, Package, Music, Image as ImageIcon, MessageSquare, Send, Save, Download, Upload, Loader2, Play, Square } from 'lucide-react';
 
-    <style>
-        body { background-color: #0f172a; color: #e2e8f0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
-        .scrollbar-hide::-webkit-scrollbar { display: none; }
-        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-        .markdown p { margin-bottom: 0.75rem; line-height: 1.6; }
-        .markdown strong { color: #38bdf8; }
-        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
-    </style>
-</head>
-<body>
-    <div id="root"></div>
+// --- CONFIGURAÇÃO DA API GEMINI ---
+// O ambiente do Canvas injeta a chave aqui, mas deixamos editável para quando exportar
+let envApiKey = "";
+if (typeof apiKey !== 'undefined') { envApiKey = apiKey; }
 
-    <script type="text/babel">
-        const { useState, useEffect, useRef } = React;
+const App = () => {
+  // --- ESTADOS GERAIS ---
+  const [apiKeyInput, setApiKeyInput] = useState(envApiKey);
+  const [gameState, setGameState] = useState('menu'); // menu, setup, playing
+  const [activeTab, setActiveTab] = useState('story'); // story, inventory, npcs, music, settings
+  const [loading, setLoading] = useState(false);
+  const [systemMessage, setSystemMessage] = useState('');
 
-        // --- CONSTANTS & HELPERS ---
-        const API_KEY = ""; // Injetado pelo ambiente
-        const TEXT_MODEL = "gemini-2.5-flash-preview-09-2025";
-        const IMAGE_MODEL = "gemini-2.5-flash-image-preview";
+  // --- ESTADOS DO JOGO ---
+  const [campaignType, setCampaignType] = useState('original');
+  const [genre, setGenre] = useState('');
+  const [customSetting, setCustomSetting] = useState('');
+  
+  const [player, setPlayer] = useState({
+    name: '', race: '', class: '',
+    hp: 20, maxHp: 20, sanity: 10, maxSanity: 10, exp: 0, effort: 5, maxEffort: 5,
+    attributes: { forca: 10, destreza: 10, inteligencia: 10, carisma: 10 },
+    backstory: '', skills: [], image: null
+  });
 
-        const defaultPlayer = {
-            name: "Desconhecido", image: "", race: "Humano", charClass: "Aventureiro",
-            attributes: { str: 10, dex: 10, int: 10, cha: 10 },
-            hp: 20, maxHp: 20, sanity: 100, maxSanity: 100, exp: 0, effort: 10, maxEffort: 10,
-            backstory: "", skills: []
+  const [location, setLocation] = useState('A Origem');
+  const [party, setParty] = useState([]); // Apenas nomes para o HUD
+  const [npcs, setNpcs] = useState([]); // Objetos completos
+  const [inventory, setInventory] = useState({
+    limit: 10,
+    items: [
+      { id: '1', name: 'Rações de Viagem', type: 'consumable', desc: 'Comida para 3 dias.' }
+    ]
+  });
+
+  const [history, setHistory] = useState([]);
+  const [contextLog, setContextLog] = useState("Início da aventura."); // Resumo para a IA
+
+  // --- ESTADOS DE UI E MÚSICA ---
+  const [inputText, setInputText] = useState('');
+  const [inputMode, setInputMode] = useState('acao'); // acao, fala, descricao
+  const [musicTracks, setMusicTracks] = useState({
+    combate: null, calmo: null, tensao: null, boss: null
+  });
+  const [currentTrackName, setCurrentTrackName] = useState(null);
+  const audioRef = useRef(new Audio());
+  const chatEndRef = useRef(null);
+
+  // --- AUTO SCROLL ---
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [history]);
+
+  // --- SISTEMA DE MÚSICA ---
+  const handleMusicUpload = (type, e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      setMusicTracks(prev => ({ ...prev, [type]: url }));
+    }
+  };
+
+  const playMusic = (type) => {
+    if (currentTrackName === type) {
+      audioRef.current.pause();
+      setCurrentTrackName(null);
+      return;
+    }
+    if (musicTracks[type]) {
+      audioRef.current.src = musicTracks[type];
+      audioRef.current.loop = true;
+      audioRef.current.play();
+      setCurrentTrackName(type);
+    } else {
+      showSystemMessage("Nenhuma música carregada para este clima.");
+    }
+  };
+
+  // --- HELPERS ---
+  const showSystemMessage = (msg) => {
+    setSystemMessage(msg);
+    setTimeout(() => setSystemMessage(''), 3000);
+  };
+
+  const handleImageUpload = (e, targetId = null) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (targetId === 'player') {
+          setPlayer(prev => ({ ...prev, image: reader.result }));
+        } else {
+          setNpcs(prev => prev.map(npc => npc.id === targetId ? { ...npc, image: reader.result } : npc));
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // --- CHAMADAS DE API GEMINI ---
+  const callGemini = async (prompt, isJson = false, isImage = false) => {
+    if (!apiKeyInput) {
+      showSystemMessage("Erro: Chave da API ausente. Vá em Configurações.");
+      return null;
+    }
+
+    try {
+      if (isImage) {
+        // Fallback obrigatório para Canvas (gemini-2.5-flash-image-preview)
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent?key=${apiKeyInput}`;
+        const payload = {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseModalities: ['TEXT', 'IMAGE'] }
         };
-
-        const defaultContext = { location: "Ponto de Partida", party: [] };
+        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const data = await response.json();
         
-        const initialMusicState = {
-            padrao: null, combate: null, boss: null, calmo: null, investigacao: null, tensao: null
+        const base64 = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
+        if (base64) return `data:image/jpeg;base64,${base64}`;
+        return null;
+      } else {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKeyInput}`;
+        
+        const systemInstruction = isJson ? 
+          `Você é o Mestre de um RPG de mesa. Responda ESTRITAMENTE em JSON válido usando este formato exato:
+          {
+            "narrativa": "O texto da história descrevendo o que acontece...",
+            "localAtual": "Nome do local",
+            "npcsNoGrupo": ["Nome1", "Nome2"],
+            "atualizacoesJogador": { "hp": 0, "sanidade": 0, "exp": 0, "esforco": 0 },
+            "itensAdicionados": [{"id": "unico", "name": "Nome", "type": "arma/documento/item", "damage": "1d6 se arma", "desc": "descrição"}],
+            "itensRemovidos": ["ID do item a remover"],
+            "novosNpcsConhecidos": [{"id": "unico", "name": "Nome", "affinity": 50, "personality": "...", "appearance": "..."}]
+          }` : 
+          "Você é um assistente de criação de RPG. Responda em texto claro e direto.";
+
+        const payload = {
+          contents: [{ parts: [{ text: prompt }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] }
         };
 
-        // --- MAIN APP COMPONENT ---
-        function App() {
-            const [gameState, setGameState] = useState('menu'); // menu, creation, playing
-            const [campaignType, setCampaignType] = useState('original'); // original, custom
-            
-            // Core Game State
-            const [player, setPlayer] = useState(defaultPlayer);
-            const [gameContext, setGameContext] = useState(defaultContext);
-            const [inventory, setInventory] = useState({ items: [], maxCapacity: 10 });
-            const [relationships, setRelationships] = useState([]);
-            const [storyLog, setStoryLog] = useState([]);
-            
-            // UI State
-            const [activeTab, setActiveTab] = useState('chat'); // chat, inventory, relationships, music
-            const [isLoading, setIsLoading] = useState(false);
-            const [musicFiles, setMusicFiles] = useState(initialMusicState);
-            const [activeMusicCategory, setActiveMusicCategory] = useState(null);
-            
-            const audioRef = useRef(new Audio());
-
-            // --- SAVE / LOAD SYSTEM ---
-            useEffect(() => {
-                const saved = localStorage.getItem('rpg_save_data');
-                if (saved) {
-                    try {
-                        const data = JSON.parse(saved);
-                        setPlayer(data.player);
-                        setGameContext(data.gameContext);
-                        setInventory(data.inventory);
-                        setRelationships(data.relationships);
-                        setStoryLog(data.storyLog);
-                        setGameState('playing');
-                    } catch(e) { console.error("Erro ao carregar save", e); }
-                }
-            }, []);
-
-            const saveGame = () => {
-                const data = { player, gameContext, inventory, relationships, storyLog };
-                localStorage.setItem('rpg_save_data', JSON.stringify(data));
-                alert("Jogo salvo com sucesso!");
-            };
-
-            const exportGame = () => {
-                const data = { player, gameContext, inventory, relationships, storyLog };
-                const blob = new Blob([JSON.stringify(data)], { type: "application/json" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `rpg_save_${new Date().getTime()}.json`;
-                a.click();
-            };
-
-            const importGame = (e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    try {
-                        const data = JSON.parse(event.target.result);
-                        setPlayer(data.player);
-                        setGameContext(data.gameContext);
-                        setInventory(data.inventory);
-                        setRelationships(data.relationships);
-                        setStoryLog(data.storyLog);
-                        setGameState('playing');
-                    } catch(err) { alert("Arquivo de save inválido."); }
-                };
-                reader.readAsText(file);
-            };
-
-            // --- AUDIO SYSTEM ---
-            useEffect(() => {
-                if (activeMusicCategory && musicFiles[activeMusicCategory]) {
-                    audioRef.current.src = musicFiles[activeMusicCategory];
-                    audioRef.current.loop = true;
-                    audioRef.current.play().catch(e => console.log("Auto-play prevented", e));
-                } else {
-                    audioRef.current.pause();
-                }
-            }, [activeMusicCategory, musicFiles]);
-
-            const handleMusicUpload = (category, file) => {
-                if (file) {
-                    const url = URL.createObjectURL(file);
-                    setMusicFiles(prev => ({ ...prev, [category]: url }));
-                }
-            };
-
-            // --- API CALLS ---
-            const callGeminiText = async (prompt, systemInstruction = "") => {
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${TEXT_MODEL}:generateContent?key=${API_KEY}`;
-                
-                const payload = {
-                    contents: [{ parts: [{ text: prompt }] }],
-                    systemInstruction: { parts: [{ text: systemInstruction }] }
-                };
-
-                let retries = 3;
-                while (retries > 0) {
-                    try {
-                        const response = await fetch(url, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify(payload)
-                        });
-                        const data = await response.json();
-                        if (data.error) throw new Error(data.error.message);
-                        return data.candidates[0].content.parts[0].text;
-                    } catch (error) {
-                        retries--;
-                        if (retries === 0) throw error;
-                        await new Promise(r => setTimeout(r, 2000));
-                    }
-                }
-            };
-
-            const generateImage = async (prompt) => {
-                const url = `https://generativelanguage.googleapis.com/v1beta/models/${IMAGE_MODEL}:generateContent?key=${API_KEY}`;
-                const payload = {
-                    contents: [{ parts: [{ text: `Um retrato estilo RPG, arte conceitual, fantasia, de: ${prompt}` }] }],
-                    generationConfig: { responseModalities: ["IMAGE"] }
-                };
-
-                try {
-                    const response = await fetch(url, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(payload)
-                    });
-                    const data = await response.json();
-                    const base64 = data.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-                    return base64 ? `data:image/png;base64,${base64}` : null;
-                } catch (e) {
-                    console.error("Erro ao gerar imagem:", e);
-                    return null;
-                }
-            };
-
-            // --- GAME LOGIC ---
-            const startGame = async (setupData) => {
-                setIsLoading(true);
-                
-                // Construct character based on input
-                let newPlayer = { ...player, name: setupData.name, race: setupData.race, charClass: setupData.charClass };
-                
-                if (setupData.generateImage) {
-                    const img = await generateImage(`${newPlayer.name}, um(a) ${newPlayer.race} ${newPlayer.charClass}`);
-                    if (img) newPlayer.image = img;
-                }
-
-                const systemPrompt = `Você é um mestre de RPG ajudando a criar a ficha de um personagem.
-                Baseado no Nome (${newPlayer.name}), Raça (${newPlayer.race}) e Classe (${newPlayer.charClass}), gere um JSON com Atributos (str, dex, int, cha), História de fundo curta (backstory) e 3 habilidades iniciais (skills array).
-                Retorne APENAS um JSON válido.`;
-
-                try {
-                    const aiSetup = await callGeminiText("Gere os dados iniciais do personagem.", systemPrompt);
-                    const parsed = JSON.parse(aiSetup.replace(/```json|```/g, '').trim());
-                    
-                    newPlayer = {
-                        ...newPlayer,
-                        attributes: parsed.attributes || newPlayer.attributes,
-                        backstory: parsed.backstory || "Uma figura misteriosa.",
-                        skills: parsed.skills || ["Ataque Básico"]
-                    };
-                    
-                    setPlayer(newPlayer);
-                    setGameContext({ location: "Início da Aventura", party: [] });
-                    setGameState('playing');
-                    
-                    // Initial Prologue
-                    handlePlayerAction("iniciar_campanha", `O jogador começou uma campanha no universo: ${setupData.universe || 'Padrão Fantasia Medieval'}. Gênero: ${setupData.genre}.`);
-
-                } catch (error) {
-                    console.error(error);
-                    alert("Erro ao criar personagem com a IA. Tentando com dados padrão.");
-                    setPlayer(newPlayer);
-                    setGameState('playing');
-                }
-                setIsLoading(false);
-            };
-
-            const handlePlayerAction = async (actionType, text) => {
-                if (!text.trim()) return;
-                
-                const userMessage = { role: 'user', content: `[${actionType.toUpperCase()}] ${text}` };
-                setStoryLog(prev => [...prev, userMessage]);
-                setIsLoading(true);
-
-                // Build context for the AI
-                const recentHistory = storyLog.slice(-10).map(l => `${l.role === 'user' ? 'Jogador' : 'Mestre'}: ${l.content}`).join('\n');
-                
-                const systemPrompt = `Você é o Game Master (Mestre) de um RPG de texto. 
-                Sua tarefa é narrar a história de forma imersiva e responsiva às ações do jogador.
-                
-                REGRAS DE NARRATIVA:
-                - O jogador escolhe a ação: AÇÃO (tenta fazer algo), FALA (diz algo) ou DESCRIÇÃO (pergunta sobre o ambiente/lore).
-                - Seja descritivo, mas mantenha a ação fluindo. Não escreva blocos de texto gigantescos de uma vez.
-                
-                ESTADO ATUAL DO JOGO (Para seu conhecimento):
-                Personagem: ${player.name} (${player.race} ${player.charClass}). Vida: ${player.hp}/${player.maxHp}. Sanidade: ${player.sanity}/${player.maxSanity}. Esforço: ${player.effort}/${player.maxEffort}.
-                Local Atual: ${gameContext.location}.
-                NPCs no grupo: ${gameContext.party.join(', ') || 'Nenhum'}.
-                Inventário: ${inventory.items.map(i => i.name).join(', ') || 'Vazio'}.
-                Relacionamentos Chave: ${relationships.map(r => `${r.name} (${r.status})`).join('; ')}.
-
-                MUITO IMPORTANTE - ATUALIZAÇÃO DE ESTADO:
-                Você tem o poder de alterar o estado do jogo. No final da sua resposta narrativa, você DEVE incluir um bloco de código JSON isolado começando com \`\`\`json e terminando com \`\`\` com as atualizações que ocorreram neste turno.
-                Se nada mudou, envie valores vazios/nulos.
-                
-                Formato do JSON exigido no final:
-                \`\`\`json
-                {
-                  "hp_change": 0,
-                  "sanity_change": 0,
-                  "effort_change": 0,
-                  "exp_gain": 0,
-                  "new_location": "Nome do Local Atualizado se mudou ou null",
-                  "party_updates": ["Lista atualizada de quem acompanha o jogador, ou null se sem mudança"],
-                  "inventory_add": [{"name": "Nome", "desc": "Descricao", "type": "weapon/item/document", "damage": "1d6 (se arma)", "content": "Texto se for documento"}],
-                  "inventory_remove": ["Nome do item a remover"],
-                  "new_relationships": [{"name": "Nome NPC", "status": "Aliado/Inimigo/Neutro", "backstory": "Resumo", "personality": "Resumo", "appearance": "Descricao visual"}],
-                  "suggested_music": "padrao|combate|boss|calmo|investigacao|tensao"
-                }
-                \`\`\`
-                `;
-
-                try {
-                    const aiResponse = await callGeminiText(`Histórico recente:\n${recentHistory}\n\nAção atual do jogador: ${userMessage.content}`, systemPrompt);
-                    
-                    // Parse response
-                    const jsonMatch = aiResponse.match(/```json\n([\s\S]*?)\n```/);
-                    let narrativeText = aiResponse;
-                    let stateUpdates = null;
-
-                    if (jsonMatch && jsonMatch[1]) {
-                        narrativeText = aiResponse.replace(jsonMatch[0], '').trim();
-                        try {
-                            stateUpdates = JSON.parse(jsonMatch[1]);
-                            applyStateUpdates(stateUpdates);
-                        } catch(e) { console.error("Falha ao processar JSON da IA", e); }
-                    }
-
-                    setStoryLog(prev => [...prev, { role: 'ai', content: narrativeText }]);
-
-                } catch (error) {
-                    console.error(error);
-                    setStoryLog(prev => [...prev, { role: 'system', content: "Ocorreu uma distorção na malha da realidade (Erro de API). Tente novamente." }]);
-                }
-                setIsLoading(false);
-            };
-
-            const applyStateUpdates = (updates) => {
-                if (!updates) return;
-
-                setPlayer(p => ({
-                    ...p,
-                    hp: Math.max(0, Math.min(p.maxHp, p.hp + (updates.hp_change || 0))),
-                    sanity: Math.max(0, Math.min(p.maxSanity, p.sanity + (updates.sanity_change || 0))),
-                    effort: Math.max(0, Math.min(p.maxEffort, p.effort + (updates.effort_change || 0))),
-                    exp: p.exp + (updates.exp_gain || 0)
-                }));
-
-                if (updates.new_location) {
-                    setGameContext(prev => ({ ...prev, location: updates.new_location }));
-                }
-                if (updates.party_updates && Array.isArray(updates.party_updates)) {
-                    setGameContext(prev => ({ ...prev, party: updates.party_updates }));
-                }
-
-                if (updates.inventory_add && updates.inventory_add.length > 0) {
-                    setInventory(prev => ({
-                        ...prev,
-                        items: [...prev.items, ...updates.inventory_add].slice(0, prev.maxCapacity)
-                    }));
-                }
-                if (updates.inventory_remove && updates.inventory_remove.length > 0) {
-                    setInventory(prev => ({
-                        ...prev,
-                        items: prev.items.filter(i => !updates.inventory_remove.includes(i.name))
-                    }));
-                }
-
-                if (updates.new_relationships && updates.new_relationships.length > 0) {
-                    setRelationships(prev => {
-                        let newRels = [...prev];
-                        updates.new_relationships.forEach(nr => {
-                            if (!newRels.find(r => r.name === nr.name)) {
-                                newRels.push({ ...nr, id: Date.now() + Math.random() });
-                            }
-                        });
-                        return newRels;
-                    });
-                }
-
-                if (updates.suggested_music) {
-                    setActiveMusicCategory(updates.suggested_music);
-                }
-            };
-
-            // --- RENDERERS ---
-            if (gameState === 'menu') {
-                return (
-                    <div className="min-h-screen flex flex-col items-center justify-center p-4">
-                        <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center shadow-2xl">
-                            <h1 className="text-4xl font-bold mb-2 text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-cyan-400">Chronos IA RPG</h1>
-                            <p className="text-slate-400 mb-8">Forje seu destino através de narrativas infinitas.</p>
-                            
-                            <div className="space-y-4">
-                                <button onClick={() => { setCampaignType('original'); setGameState('creation'); }} className="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 rounded-lg font-semibold transition">
-                                    Campanha Rápida (Original)
-                                </button>
-                                <button onClick={() => { setCampaignType('custom'); setGameState('creation'); }} className="w-full py-3 px-4 bg-slate-700 hover:bg-slate-600 rounded-lg font-semibold transition border border-slate-500">
-                                    Campanha Personalizada
-                                </button>
-                                
-                                <div className="pt-4 border-t border-slate-700 flex justify-center">
-                                    <label className="cursor-pointer text-sm text-cyan-400 hover:text-cyan-300">
-                                        Importar Save
-                                        <input type="file" accept=".json" className="hidden" onChange={importGame} />
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                );
-            }
-
-            if (gameState === 'creation') {
-                return <CharacterCreationForm campaignType={campaignType} onStart={startGame} onBack={() => setGameState('menu')} isLoading={isLoading} />;
-            }
-
-            return (
-                <div className="flex flex-col h-screen bg-slate-900">
-                    {/* TOP HEADER */}
-                    <header className="glass-panel flex flex-col md:flex-row justify-between items-center p-3 z-10 shadow-md">
-                        {/* Player Stats */}
-                        <div className="flex items-center space-x-4 w-full md:w-auto">
-                            <div className="w-14 h-14 rounded-full bg-slate-800 border-2 border-indigo-500 overflow-hidden flex-shrink-0">
-                                {player.image ? <img src={player.image} alt="Player" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-slate-500 text-xs">Sem Foto</div>}
-                            </div>
-                            <div className="flex-1 min-w-0">
-                                <h2 className="font-bold text-lg truncate">{player.name}</h2>
-                                <div className="flex gap-2 text-xs">
-                                    <span className="text-red-400">❤️ {player.hp}/{player.maxHp}</span>
-                                    <span className="text-purple-400">🧠 {player.sanity}/{player.maxSanity}</span>
-                                    <span className="text-yellow-400">⚡ {player.effort}/{player.maxEffort}</span>
-                                    <span className="text-green-400">⭐ {player.exp} XP</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Context Info */}
-                        <div className="mt-3 md:mt-0 text-right w-full md:w-auto bg-slate-800 p-2 rounded border border-slate-700">
-                            <div className="text-sm font-semibold text-cyan-400">📍 {gameContext.location}</div>
-                            <div className="text-xs text-slate-400 truncate max-w-[200px]">👥 Grupo: {gameContext.party.length > 0 ? gameContext.party.join(', ') : 'Sozinho'}</div>
-                        </div>
-                    </header>
-
-                    {/* MAIN CONTENT AREA */}
-                    <div className="flex-1 flex flex-col md:flex-row overflow-hidden relative">
-                        
-                        {/* MOBILE TABS NAV */}
-                        <div className="md:hidden flex overflow-x-auto bg-slate-800 border-b border-slate-700">
-                            {['chat', 'inventory', 'relationships', 'music', 'system'].map(tab => (
-                                <button key={tab} onClick={() => setActiveTab(tab)} className={`px-4 py-2 text-sm font-medium capitalize whitespace-nowrap ${activeTab === tab ? 'text-indigo-400 border-b-2 border-indigo-400' : 'text-slate-400'}`}>
-                                    {tab === 'chat' ? 'História' : tab === 'inventory' ? 'Inventário' : tab === 'relationships' ? 'NPCs' : tab === 'music' ? 'Músicas' : 'Sistema'}
-                                </button>
-                            ))}
-                        </div>
-
-                        {/* LEFT/CENTER: CHAT (Always visible on desktop, tab on mobile) */}
-                        <div className={`flex-1 flex-col relative ${activeTab === 'chat' ? 'flex' : 'hidden md:flex'}`}>
-                            <ChatLog logs={storyLog} isLoading={isLoading} />
-                            <InputArea onSend={handlePlayerAction} isLoading={isLoading} />
-                        </div>
-
-                        {/* RIGHT: SIDEBAR TABS (Hidden on mobile if not active) */}
-                        <div className={`w-full md:w-80 bg-slate-800/50 border-l border-slate-700 flex-col overflow-y-auto ${activeTab !== 'chat' ? 'flex md:flex' : 'hidden md:flex'}`}>
-                            
-                            {/* Desktop Tab Headers */}
-                            <div className="hidden md:flex flex-wrap bg-slate-800 border-b border-slate-700">
-                                {['inventory', 'relationships', 'music', 'system'].map(tab => (
-                                    <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 px-2 py-3 text-xs font-semibold uppercase tracking-wider ${activeTab === tab ? 'text-cyan-400 bg-slate-700/50' : 'text-slate-400 hover:text-slate-200'}`}>
-                                        {tab === 'inventory' ? 'Inv' : tab === 'relationships' ? 'NPCs' : tab === 'music' ? 'Som' : 'Sis'}
-                                    </button>
-                                ))}
-                            </div>
-
-                            <div className="p-4 flex-1 overflow-y-auto">
-                                {activeTab === 'inventory' && <InventoryPanel inventory={inventory} />}
-                                {activeTab === 'relationships' && <RelationshipsPanel relationships={relationships} setRelationships={setRelationships} />}
-                                {activeTab === 'music' && <MusicPanel musicFiles={musicFiles} handleUpload={handleMusicUpload} activeCategory={activeMusicCategory} setActiveCategory={setActiveMusicCategory} />}
-                                {activeTab === 'system' && (
-                                    <div className="space-y-4">
-                                        <h3 className="font-bold text-lg border-b border-slate-600 pb-2">Sistema</h3>
-                                        <button onClick={saveGame} className="w-full py-2 bg-slate-700 hover:bg-slate-600 rounded">Salvar Progresso (Local)</button>
-                                        <button onClick={exportGame} className="w-full py-2 bg-indigo-700 hover:bg-indigo-600 rounded">Exportar Save</button>
-                                        <div className="p-3 bg-red-900/30 border border-red-700/50 rounded text-xs text-red-200 mt-4">
-                                            Atenção: Limpar o cache do navegador apaga os saves locais. Músicas carregadas precisam ser readicionadas após recarregar a página por motivos de segurança do navegador.
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            );
+        if (isJson) {
+          payload.generationConfig = { responseMimeType: "application/json" };
         }
 
-        // --- SUB-COMPONENTS ---
-
-        function CharacterCreationForm({ campaignType, onStart, onBack, isLoading }) {
-            const [formData, setFormData] = useState({
-                name: '', race: 'Humano', charClass: 'Aventureiro', 
-                universe: '', genre: 'Fantasia', generateImage: true
-            });
-
-            const handleChange = (e) => setFormData({...formData, [e.target.name]: e.target.type === 'checkbox' ? e.target.checked : e.target.value});
-
-            return (
-                <div className="min-h-screen flex items-center justify-center p-4">
-                    <div className="glass-panel p-6 rounded-xl w-full max-w-lg shadow-xl max-h-[90vh] overflow-y-auto">
-                        <h2 className="text-2xl font-bold mb-4">Criação de Personagem e Mundo</h2>
-                        
-                        <div className="space-y-4">
-                            {campaignType === 'custom' && (
-                                <>
-                                    <div>
-                                        <label className="block text-sm text-slate-400 mb-1">Universo/Cenário</label>
-                                        <input type="text" name="universe" value={formData.universe} onChange={handleChange} placeholder="Ex: Cyberpunk, Senhor dos Anéis..." className="w-full p-2 bg-slate-800 rounded border border-slate-600 focus:border-indigo-500 outline-none" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm text-slate-400 mb-1">Gênero/Clima</label>
-                                        <input type="text" name="genre" value={formData.genre} onChange={handleChange} placeholder="Ex: Terror psicológico, Aventura épica..." className="w-full p-2 bg-slate-800 rounded border border-slate-600 outline-none" />
-                                    </div>
-                                </>
-                            )}
-                            {campaignType === 'original' && (
-                                <div>
-                                    <label className="block text-sm text-slate-400 mb-1">Gênero da História</label>
-                                    <select name="genre" value={formData.genre} onChange={handleChange} className="w-full p-2 bg-slate-800 rounded border border-slate-600 outline-none">
-                                        <option>Fantasia Medieval</option><option>Ficção Científica</option><option>Investigação Noir</option><option>Horror Cósmico</option>
-                                    </select>
-                                </div>
-                            )}
-
-                            <div className="border-t border-slate-700 my-4"></div>
-
-                            <div>
-                                <label className="block text-sm text-slate-400 mb-1">Nome do Personagem</label>
-                                <input type="text" name="name" value={formData.name} onChange={handleChange} required className="w-full p-2 bg-slate-800 rounded border border-slate-600 outline-none" />
-                            </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-sm text-slate-400 mb-1">Raça</label>
-                                    <input type="text" name="race" value={formData.race} onChange={handleChange} className="w-full p-2 bg-slate-800 rounded border border-slate-600 outline-none" />
-                                </div>
-                                <div>
-                                    <label className="block text-sm text-slate-400 mb-1">Classe/Profissão</label>
-                                    <input type="text" name="charClass" value={formData.charClass} onChange={handleChange} className="w-full p-2 bg-slate-800 rounded border border-slate-600 outline-none" />
-                                </div>
-                            </div>
-                            
-                            <label className="flex items-center space-x-2 mt-4 cursor-pointer text-sm text-slate-300">
-                                <input type="checkbox" name="generateImage" checked={formData.generateImage} onChange={handleChange} className="rounded text-indigo-500 bg-slate-800" />
-                                <span>Gerar retrato com IA (Pode demorar um pouco)</span>
-                            </label>
-
-                            <div className="flex gap-3 mt-6">
-                                <button onClick={onBack} disabled={isLoading} className="flex-1 py-2 bg-slate-700 hover:bg-slate-600 rounded transition disabled:opacity-50">Voltar</button>
-                                <button onClick={() => onStart(formData)} disabled={!formData.name || isLoading} className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 font-bold rounded transition disabled:opacity-50 flex justify-center items-center">
-                                    {isLoading ? <span className="animate-pulse">Criando...</span> : 'Iniciar Aventura'}
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            );
+        const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        const data = await response.json();
+        
+        const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (isJson) {
+          try {
+             return JSON.parse(textResponse);
+          } catch (e) {
+             console.error("Falha ao fazer parse do JSON", textResponse);
+             // Tenta extrair JSON se a IA enviou markdown
+             const match = textResponse.match(/```json\n([\s\S]*?)\n```/);
+             if (match) return JSON.parse(match[1]);
+             throw new Error("Resposta da IA não foi um JSON válido.");
+          }
         }
+        return textResponse;
+      }
+    } catch (error) {
+      console.error(error);
+      showSystemMessage("Erro na comunicação com a IA.");
+      return null;
+    }
+  };
 
-        function ChatLog({ logs, isLoading }) {
-            const endRef = useRef(null);
-            
-            useEffect(() => {
-                endRef.current?.scrollIntoView({ behavior: 'smooth' });
-            }, [logs, isLoading]);
+  // --- AÇÕES DO JOGO ---
+  const generatePlayerBackground = async () => {
+    setLoading(true);
+    const prompt = `Crie uma história de fundo curta (1 parágrafo), atributos (forca, destreza, inteligencia, carisma de 1 a 20) e 3 habilidades iniciais para um personagem chamado ${player.name}, da raça ${player.race} e classe ${player.class} no gênero ${genre || customSetting}. Responda em JSON: {"backstory": "...", "attributes": {"forca": 10...}, "skills": ["hab1", "hab2", "hab3"]}`;
+    
+    const result = await callGemini(prompt, true);
+    if (result) {
+      setPlayer(prev => ({ ...prev, backstory: result.backstory, attributes: result.attributes, skills: result.skills }));
+    }
+    setLoading(false);
+  };
 
-            const formatText = (text) => {
-                return text.split('\n').map((line, i) => <p key={i} className="mb-2">{line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}</p>);
-            };
+  const generateNpcImage = async (npcId, appearance, genre) => {
+    setLoading(true);
+    showSystemMessage("Gerando retrato...");
+    const prompt = `A portrait of a fantasy/sci-fi RPG character. Appearance: ${appearance}. Setting: ${genre || 'dark fantasy'}. High quality, digital art, character concept art.`;
+    const imageUrl = await callGemini(prompt, false, true);
+    
+    if (imageUrl) {
+      setNpcs(prev => prev.map(n => n.id === npcId ? { ...n, image: imageUrl } : n));
+    } else {
+      showSystemMessage("Falha ao gerar imagem. O modelo de imagem pode não estar disponível.");
+    }
+    setLoading(false);
+  };
 
-            return (
-                <div className="flex-1 overflow-y-auto p-4 space-y-6 scrollbar-hide">
-                    {logs.length === 0 && (
-                        <div className="h-full flex items-center justify-center text-slate-500 italic">
-                            O silêncio preenche o vazio. O que você fará?
-                        </div>
-                    )}
-                    {logs.map((log, index) => (
-                        <div key={index} className={`flex ${log.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[85%] rounded-xl p-4 ${log.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : log.role === 'system' ? 'bg-red-900/50 text-red-200 border border-red-800 mx-auto text-center text-sm' : 'glass-panel rounded-bl-none markdown text-slate-200'}`}>
-                                {formatText(log.content)}
-                            </div>
-                        </div>
-                    ))}
-                    {isLoading && (
-                        <div className="flex justify-start">
-                            <div className="glass-panel rounded-xl rounded-bl-none p-4 w-24 flex justify-center items-center space-x-2">
-                                <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></div>
-                                <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
-                                <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{animationDelay: '0.4s'}}></div>
-                            </div>
-                        </div>
-                    )}
-                    <div ref={endRef} />
-                </div>
-            );
+  const startGame = async () => {
+    setLoading(true);
+    setGameState('playing');
+    
+    const prompt = `Inicie a campanha. Cenário: ${campaignType === 'custom' ? customSetting : genre}. 
+    Personagem: ${player.name}, ${player.race} ${player.class}. História: ${player.backstory}.
+    Descreva a cena inicial, onde o personagem está, e pergunte o que ele faz.`;
+
+    const result = await callGemini(prompt, true);
+    if (result) {
+      processGmResponse(result);
+    }
+    setLoading(false);
+  };
+
+  const processGmResponse = (data) => {
+    // Atualiza História
+    setHistory(prev => [...prev, { role: 'gm', content: data.narrativa }]);
+    setContextLog(prev => (prev + " \n " + data.narrativa).slice(-2000)); // Mantém contexto limitado
+    
+    // Atualiza HUD Direito
+    if (data.localAtual) setLocation(data.localAtual);
+    if (data.npcsNoGrupo) setParty(data.npcsNoGrupo);
+
+    // Atualiza Status do Jogador
+    if (data.atualizacoesJogador) {
+      setPlayer(prev => ({
+        ...prev,
+        hp: Math.min(prev.maxHp, Math.max(0, prev.hp + (data.atualizacoesJogador.hp || 0))),
+        sanity: Math.min(prev.maxSanity, Math.max(0, prev.sanity + (data.atualizacoesJogador.sanidade || 0))),
+        exp: prev.exp + (data.atualizacoesJogador.exp || 0),
+        effort: Math.min(prev.maxEffort, Math.max(0, prev.effort + (data.atualizacoesJogador.esforco || 0)))
+      }));
+    }
+
+    // Atualiza Inventário
+    if (data.itensAdicionados && data.itensAdicionados.length > 0) {
+      setInventory(prev => ({ ...prev, items: [...prev.items, ...data.itensAdicionados] }));
+      showSystemMessage(`Novos itens recebidos!`);
+    }
+    if (data.itensRemovidos && data.itensRemovidos.length > 0) {
+      setInventory(prev => ({ ...prev, items: prev.items.filter(i => !data.itensRemovidos.includes(i.id)) }));
+    }
+
+    // Atualiza NPCs Relacionamentos
+    if (data.novosNpcsConhecidos && data.novosNpcsConhecidos.length > 0) {
+      setNpcs(prev => {
+        const newNpcs = [...prev];
+        data.novosNpcsConhecidos.forEach(newNpc => {
+          if (!newNpcs.find(n => n.name === newNpc.name)) {
+            newNpcs.push({ ...newNpc, backstory: 'Desconhecida', image: null });
+          }
+        });
+        return newNpcs;
+      });
+    }
+  };
+
+  const handleAction = async () => {
+    if (!inputText.trim()) return;
+    
+    const actionText = inputText;
+    setInputText('');
+    setHistory(prev => [...prev, { role: 'player', type: inputMode, content: actionText }]);
+    setLoading(true);
+
+    const prompt = `Contexto recente: ${contextLog}
+    Status do jogador: HP ${player.hp}/${player.maxHp}, Sanidade ${player.sanity}/${player.maxSanity}.
+    Inventário atual: ${inventory.items.map(i=>i.name).join(', ')}.
+    Ação do jogador (${inputMode}): "${actionText}".
+    Resolva a ação, atualize a narrativa e retorne o JSON de acordo com a instrução do sistema. Se for combate, aplique dano. Se pegar algo, adicione ao inventário.`;
+
+    const result = await callGemini(prompt, true);
+    if (result) {
+      processGmResponse(result);
+    } else {
+      setHistory(prev => [...prev, { role: 'gm', content: "O Mestre teve um lapso de memória (Erro de conexão). Tente novamente." }]);
+    }
+    setLoading(false);
+  };
+
+  // --- SAVE / LOAD ---
+  const saveGame = () => {
+    const saveData = { player, location, party, npcs, inventory, history, contextLog, genre, customSetting, campaignType };
+    localStorage.setItem('nexusRpgSave', JSON.stringify(saveData));
+    showSystemMessage("Jogo Salvo Localmente!");
+  };
+
+  const loadGame = () => {
+    const data = localStorage.getItem('nexusRpgSave');
+    if (data) {
+      const parsed = JSON.parse(data);
+      setPlayer(parsed.player); setLocation(parsed.location); setParty(parsed.party);
+      setNpcs(parsed.npcs); setInventory(parsed.inventory); setHistory(parsed.history);
+      setContextLog(parsed.contextLog); setGenre(parsed.genre); setCustomSetting(parsed.customSetting);
+      setCampaignType(parsed.campaignType);
+      setGameState('playing');
+      showSystemMessage("Jogo Carregado!");
+    } else {
+      showSystemMessage("Nenhum save encontrado.");
+    }
+  };
+
+  const exportGame = () => {
+    const saveData = { player, location, party, npcs, inventory, history, contextLog };
+    const blob = new Blob([JSON.stringify(saveData)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `NexusSave_${player.name || 'Game'}.json`;
+    a.click();
+  };
+
+  const importGame = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const parsed = JSON.parse(event.target.result);
+          setPlayer(parsed.player); setLocation(parsed.location); setParty(parsed.party);
+          setNpcs(parsed.npcs); setInventory(parsed.inventory); setHistory(parsed.history);
+          setContextLog(parsed.contextLog);
+          setGameState('playing');
+        } catch (err) {
+          showSystemMessage("Arquivo inválido.");
         }
+      };
+      reader.readAsText(file);
+    }
+  };
 
-        function InputArea({ onSend, isLoading }) {
-            const [text, setText] = useState('');
-            const [mode, setMode] = useState('ação');
 
-            const handleSubmit = (e) => {
-                e.preventDefault();
-                if(!text.trim() || isLoading) return;
-                onSend(mode, text);
-                setText('');
-            };
+  // ================= RENDERIZAÇÃO =================
 
-            return (
-                <form onSubmit={handleSubmit} className="p-3 bg-slate-800 border-t border-slate-700 flex flex-col sm:flex-row gap-2">
-                    <div className="flex flex-1 gap-2 bg-slate-900 p-1 rounded-lg border border-slate-600 focus-within:border-indigo-500">
-                        <select value={mode} onChange={e => setMode(e.target.value)} className="bg-transparent text-sm font-semibold text-slate-300 outline-none pl-2 border-r border-slate-700 cursor-pointer">
-                            <option value="ação">Ação</option>
-                            <option value="fala">Fala</option>
-                            <option value="descrição">Investigar</option>
-                        </select>
-                        <input type="text" value={text} onChange={e => setText(e.target.value)} disabled={isLoading} placeholder={`Digite sua ${mode}...`} className="flex-1 bg-transparent p-2 outline-none text-white placeholder-slate-500" />
-                    </div>
-                    <button type="submit" disabled={!text.trim() || isLoading} className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-lg font-bold disabled:opacity-50 transition w-full sm:w-auto">
-                        Enviar
+  if (gameState === 'menu') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col items-center justify-center p-4 font-sans">
+        <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-600 mb-8 tracking-tighter">NEXUS RPG</h1>
+        
+        <div className="flex flex-col gap-4 w-full max-w-md">
+          <button onClick={() => { setCampaignType('original'); setGameState('setup'); }} className="p-4 bg-slate-900 border border-slate-700 hover:border-blue-500 rounded-lg font-bold transition-all text-left group">
+            <span className="text-blue-400 group-hover:text-blue-300 block">Campanha Original</span>
+            <span className="text-sm font-normal text-slate-500">Escolha o gênero e deixe a IA mestrar o mundo dela.</span>
+          </button>
+          
+          <button onClick={() => { setCampaignType('custom'); setGameState('setup'); }} className="p-4 bg-slate-900 border border-slate-700 hover:border-purple-500 rounded-lg font-bold transition-all text-left group">
+            <span className="text-purple-400 group-hover:text-purple-300 block">Campanha Customizada</span>
+            <span className="text-sm font-normal text-slate-500">Defina o universo, regras e personagens conhecidos.</span>
+          </button>
+
+          <button onClick={loadGame} className="p-4 bg-slate-900 border border-slate-700 hover:border-emerald-500 rounded-lg font-bold transition-all flex items-center justify-between">
+            <span>Continuar Jogo</span>
+            <Save size={18} />
+          </button>
+        </div>
+
+        {systemMessage && <div className="mt-8 text-yellow-400 text-sm">{systemMessage}</div>}
+      </div>
+    );
+  }
+
+  if (gameState === 'setup') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans overflow-y-auto">
+        <div className="max-w-2xl mx-auto space-y-8 pb-20">
+          <button onClick={() => setGameState('menu')} className="text-slate-500 hover:text-white">← Voltar</button>
+          
+          <div>
+            <h2 className="text-2xl font-bold mb-4 border-b border-slate-800 pb-2">Configuração do Mundo</h2>
+            {campaignType === 'original' ? (
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Gênero Literário</label>
+                <input type="text" placeholder="Ex: Cyberpunk, Fantasia Sombria, Steampunk..." value={genre} onChange={(e) => setGenre(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Descreva seu Universo em Detalhes</label>
+                <textarea rows="4" placeholder="Ex: O universo de Star Wars durante o Império. Eu sou um contrabandista procurado pelo Darth Vader..." value={customSetting} onChange={(e) => setCustomSetting(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white"></textarea>
+              </div>
+            )}
+          </div>
+
+          <div>
+            <h2 className="text-2xl font-bold mb-4 border-b border-slate-800 pb-2">Criação de Personagem</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Nome</label>
+                <input type="text" value={player.name} onChange={(e) => setPlayer(e.target.value, 'name')} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
+              </div>
+              <div>
+                <label className="block text-sm text-slate-400 mb-1">Raça</label>
+                <input type="text" value={player.race} onChange={(e) => setPlayer(e.target.value, 'race')} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
+              </div>
+              <div className="md:col-span-2">
+                <label className="block text-sm text-slate-400 mb-1">Classe / Profissão</label>
+                <input type="text" value={player.class} onChange={(e) => setPlayer(e.target.value, 'class')} className="w-full bg-slate-900 border border-slate-700 rounded p-2 text-white" />
+              </div>
+            </div>
+
+            <div className="flex gap-4">
+              <button onClick={generatePlayerBackground} disabled={loading || !player.name} className="flex-1 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded p-2 font-bold flex justify-center items-center gap-2">
+                {loading ? <Loader2 className="animate-spin" size={18} /> : <Brain size={18} />}
+                Gerar História e Status com IA
+              </button>
+            </div>
+
+            {player.backstory && (
+              <div className="mt-6 bg-slate-900 border border-slate-700 p-4 rounded-lg">
+                <h3 className="font-bold text-blue-400 mb-2">Ficha Gerada:</h3>
+                <p className="text-sm text-slate-300 italic mb-4">"{player.backstory}"</p>
+                <div className="flex flex-wrap gap-4 text-sm">
+                  <span className="bg-slate-800 px-2 py-1 rounded">FOR: {player.attributes.forca}</span>
+                  <span className="bg-slate-800 px-2 py-1 rounded">DES: {player.attributes.destreza}</span>
+                  <span className="bg-slate-800 px-2 py-1 rounded">INT: {player.attributes.inteligencia}</span>
+                  <span className="bg-slate-800 px-2 py-1 rounded">CAR: {player.attributes.carisma}</span>
+                </div>
+                <div className="mt-4">
+                  <span className="text-xs text-slate-500 uppercase">Habilidades:</span>
+                  <div className="flex gap-2 mt-1">
+                    {player.skills.map(s => <span key={s} className="bg-blue-900/30 text-blue-300 border border-blue-800/50 px-2 py-1 rounded text-xs">{s}</span>)}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <button onClick={startGame} disabled={loading || !player.name || !player.backstory} className="w-full py-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 rounded-lg font-black text-xl transition-all shadow-lg shadow-blue-900/20">
+            {loading ? 'Iniciando Servidor Neural...' : 'INICIAR JOGO'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Setadores locais de propriedade no setup
+  const setPlayerProp = (val, prop) => setPlayer(prev => ({ ...prev, [prop]: val }));
+
+  // ================= HUD DE JOGO =================
+  return (
+    <div className="h-screen bg-slate-950 text-slate-200 flex flex-col font-sans overflow-hidden">
+      
+      {/* TOAST SYSTEM */}
+      {systemMessage && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 bg-blue-900 text-white px-4 py-2 rounded shadow-xl z-50 text-sm font-bold animate-pulse">
+          {systemMessage}
+        </div>
+      )}
+
+      {/* TOP HUD */}
+      <div className="h-auto md:h-20 bg-slate-900 border-b border-slate-800 flex flex-col md:flex-row justify-between shrink-0 px-2 py-2 gap-2">
+        
+        {/* PLAYER INFO (Esquerda) */}
+        <div className="flex items-center gap-3">
+          <div className="relative w-12 h-12 md:w-16 md:h-16 bg-slate-800 rounded border-2 border-slate-700 overflow-hidden shrink-0 group">
+            {player.image ? <img src={player.image} alt="Player" className="w-full h-full object-cover" /> : <User className="w-full h-full p-2 text-slate-600" />}
+            <label className="absolute inset-0 bg-black/50 hidden group-hover:flex items-center justify-center cursor-pointer">
+              <Upload size={16} className="text-white" />
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e, 'player')} />
+            </label>
+          </div>
+          <div className="flex flex-col min-w-[200px]">
+            <span className="font-bold text-lg leading-none truncate">{player.name}</span>
+            <span className="text-xs text-slate-500 uppercase tracking-widest truncate">{player.race} {player.class}</span>
+            <div className="grid grid-cols-2 gap-x-2 gap-y-1 mt-1">
+              <div className="flex items-center gap-1 bg-red-950/30 rounded px-1">
+                <Heart size={10} className="text-red-500" />
+                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                  <div className="bg-red-500 h-full" style={{ width: `${(player.hp/player.maxHp)*100}%` }}></div>
+                </div>
+                <span className="text-[10px] text-red-400 w-6 text-right">{player.hp}</span>
+              </div>
+              <div className="flex items-center gap-1 bg-purple-950/30 rounded px-1">
+                <Brain size={10} className="text-purple-500" />
+                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                  <div className="bg-purple-500 h-full" style={{ width: `${(player.sanity/player.maxSanity)*100}%` }}></div>
+                </div>
+                <span className="text-[10px] text-purple-400 w-6 text-right">{player.sanity}</span>
+              </div>
+              <div className="flex items-center gap-1 bg-yellow-950/30 rounded px-1 col-span-2">
+                <Zap size={10} className="text-yellow-500" />
+                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                  <div className="bg-yellow-500 h-full" style={{ width: `${(player.effort/player.maxEffort)*100}%` }}></div>
+                </div>
+                <span className="text-[10px] text-yellow-400 w-6 text-right">{player.effort}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ENVIRONMENT INFO (Direita) */}
+        <div className="flex flex-col items-start md:items-end justify-center px-2 border-t border-slate-800 md:border-t-0 pt-2 md:pt-0">
+          <div className="flex items-center gap-2 text-blue-400 font-bold">
+            <MapPin size={16} />
+            <span>{location}</span>
+          </div>
+          <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
+            <Users size={14} />
+            <span>Grupo: {party.length > 0 ? party.join(', ') : 'Sozinho'}</span>
+          </div>
+          <div className="text-[10px] text-emerald-500 mt-1 font-mono uppercase border border-emerald-900/50 bg-emerald-950/20 px-1 rounded">
+            EXP: {player.exp}
+          </div>
+        </div>
+      </div>
+
+      {/* MOBILE NAV TABS */}
+      <div className="flex md:hidden bg-slate-900 border-b border-slate-800 overflow-x-auto hide-scrollbar shrink-0">
+        <button onClick={() => setActiveTab('story')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'story' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-500'}`}><MessageSquare size={16}/> História</button>
+        <button onClick={() => setActiveTab('inventory')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'inventory' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-500'}`}><Package size={16}/> Inventário</button>
+        <button onClick={() => setActiveTab('npcs')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'npcs' ? 'border-purple-500 text-purple-400' : 'border-transparent text-slate-500'}`}><Users size={16}/> NPCs</button>
+        <button onClick={() => setActiveTab('music')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'music' ? 'border-yellow-500 text-yellow-400' : 'border-transparent text-slate-500'}`}><Music size={16}/> Som</button>
+        <button onClick={() => setActiveTab('settings')} className={`p-3 shrink-0 flex items-center gap-2 border-b-2 ${activeTab === 'settings' ? 'border-slate-500 text-slate-300' : 'border-transparent text-slate-500'}`}><Settings size={16}/> Menu</button>
+      </div>
+
+      {/* MAIN CONTENT AREA */}
+      <div className="flex-1 flex overflow-hidden">
+        
+        {/* SIDEBAR (Desktop) */}
+        <div className="hidden md:flex flex-col w-20 bg-slate-900 border-r border-slate-800 py-4 items-center gap-6 shrink-0">
+          <button onClick={() => setActiveTab('story')} className={`p-3 rounded-xl transition-all ${activeTab === 'story' ? 'bg-blue-600/20 text-blue-400' : 'text-slate-500 hover:bg-slate-800'}`} title="História"><MessageSquare size={24}/></button>
+          <button onClick={() => setActiveTab('inventory')} className={`p-3 rounded-xl transition-all ${activeTab === 'inventory' ? 'bg-emerald-600/20 text-emerald-400' : 'text-slate-500 hover:bg-slate-800'}`} title="Inventário"><Package size={24}/></button>
+          <button onClick={() => setActiveTab('npcs')} className={`p-3 rounded-xl transition-all ${activeTab === 'npcs' ? 'bg-purple-600/20 text-purple-400' : 'text-slate-500 hover:bg-slate-800'}`} title="Relacionamentos"><Users size={24}/></button>
+          <button onClick={() => setActiveTab('music')} className={`p-3 rounded-xl transition-all ${activeTab === 'music' ? 'bg-yellow-600/20 text-yellow-400' : 'text-slate-500 hover:bg-slate-800'}`} title="Trilha Sonora"><Music size={24}/></button>
+          <div className="mt-auto"></div>
+          <button onClick={() => setActiveTab('settings')} className={`p-3 rounded-xl transition-all ${activeTab === 'settings' ? 'bg-slate-700 text-white' : 'text-slate-500 hover:bg-slate-800'}`} title="Configurações"><Settings size={24}/></button>
+        </div>
+
+        {/* PANELS */}
+        <div className="flex-1 relative overflow-y-auto bg-slate-950 p-4 custom-scrollbar pb-24 md:pb-32">
+          
+          {/* TAB: STORY */}
+          <div className={`${activeTab === 'story' ? 'block' : 'hidden'} max-w-3xl mx-auto space-y-6`}>
+            {history.map((msg, i) => (
+              <div key={i} className={`flex flex-col ${msg.role === 'player' ? 'items-end' : 'items-start'}`}>
+                {msg.role === 'player' && (
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] uppercase text-slate-500 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800">{msg.type}</span>
+                  </div>
+                )}
+                <div className={`p-4 rounded-2xl max-w-[90%] md:max-w-[80%] leading-relaxed shadow-sm ${
+                  msg.role === 'player' 
+                    ? 'bg-blue-900/20 border border-blue-900/50 text-blue-100 rounded-tr-sm' 
+                    : 'bg-slate-900 border border-slate-800 text-slate-300 rounded-tl-sm'
+                }`}>
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+            {loading && (
+              <div className="flex items-center gap-3 text-slate-500 p-4">
+                <Loader2 className="animate-spin" size={20} /> O Mestre está pensando...
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {/* TAB: INVENTORY */}
+          <div className={`${activeTab === 'inventory' ? 'block' : 'hidden'} max-w-4xl mx-auto`}>
+            <div className="flex justify-between items-end mb-6 border-b border-slate-800 pb-2">
+              <h2 className="text-2xl font-black text-emerald-500">Mochila</h2>
+              <span className="text-slate-500 text-sm">Capacidade: {inventory.items.length} / {inventory.limit}</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {inventory.items.map(item => (
+                <div key={item.id} className="bg-slate-900 border border-slate-800 rounded-lg p-4 hover:border-emerald-500/50 transition-colors group cursor-default">
+                  <div className="flex justify-between items-start mb-2">
+                    <h3 className="font-bold text-white group-hover:text-emerald-400">{item.name}</h3>
+                    <span className="text-xs uppercase bg-slate-800 text-slate-400 px-2 py-1 rounded">{item.type}</span>
+                  </div>
+                  <p className="text-sm text-slate-400 mb-2">{item.desc}</p>
+                  {item.damage && <div className="text-xs text-red-400 font-mono mt-2 flex items-center gap-1 bg-red-950/20 w-fit px-2 py-1 rounded"><Shield size={12}/> Dano: {item.damage}</div>}
+                  {item.content && (
+                    <button className="mt-3 text-xs text-blue-400 hover:text-blue-300 underline" onClick={() => alert(`Conteúdo do Documento:\n\n${item.content}`)}>
+                      Ler Documento
                     </button>
-                </form>
-            );
-        }
+                  )}
+                </div>
+              ))}
+              {inventory.items.length === 0 && <p className="text-slate-600 italic">Sua mochila está vazia.</p>}
+            </div>
+          </div>
 
-        function InventoryPanel({ inventory }) {
-            const [selectedDoc, setSelectedDoc] = useState(null);
-
-            return (
-                <div className="space-y-4">
-                    <div className="flex justify-between items-center border-b border-slate-700 pb-2">
-                        <h3 className="font-bold text-lg">Mochila</h3>
-                        <span className="text-sm text-slate-400">{inventory.items.length} / {inventory.maxCapacity}</span>
+          {/* TAB: NPCS */}
+          <div className={`${activeTab === 'npcs' ? 'block' : 'hidden'} max-w-4xl mx-auto`}>
+            <h2 className="text-2xl font-black text-purple-500 mb-6 border-b border-slate-800 pb-2">Registros de Contatos</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {npcs.map(npc => (
+                <div key={npc.id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+                  <div className="flex p-4 gap-4 bg-slate-800/50 border-b border-slate-800">
+                    <div className="relative w-20 h-20 bg-slate-800 rounded-lg border border-slate-700 overflow-hidden shrink-0">
+                      {npc.image ? <img src={npc.image} alt={npc.name} className="w-full h-full object-cover" /> : <User className="w-full h-full p-4 text-slate-600" />}
+                      <label className="absolute inset-0 bg-black/50 opacity-0 hover:opacity-100 flex items-center justify-center cursor-pointer transition-opacity">
+                        <Upload size={16} className="text-white" />
+                        <input type="file" accept="image/*" className="hidden" onChange={(e) => handleImageUpload(e, npc.id)} />
+                      </label>
                     </div>
-                    {inventory.items.length === 0 ? (
-                        <p className="text-slate-500 italic text-sm text-center">Seus bolsos estão vazios.</p>
-                    ) : (
-                        <ul className="space-y-2">
-                            {inventory.items.map((item, idx) => (
-                                <li key={idx} className="bg-slate-700/50 p-2 rounded border border-slate-600 flex flex-col">
-                                    <div className="flex justify-between items-start">
-                                        <span className="font-semibold text-sm text-indigo-300">{item.name}</span>
-                                        {item.damage && <span className="text-xs bg-red-900/50 text-red-300 px-1 rounded">{item.damage}</span>}
-                                    </div>
-                                    <p className="text-xs text-slate-400 mt-1">{item.desc}</p>
-                                    {item.type === 'document' && (
-                                        <button onClick={() => setSelectedDoc(selectedDoc === idx ? null : idx)} className="mt-2 text-xs bg-slate-600 hover:bg-slate-500 py-1 rounded">
-                                            {selectedDoc === idx ? 'Fechar' : 'Ler Documento'}
-                                        </button>
-                                    )}
-                                    {selectedDoc === idx && item.content && (
-                                        <div className="mt-2 p-2 bg-slate-800 rounded text-xs border border-slate-600 font-serif italic text-slate-300">
-                                            "{item.content}"
-                                        </div>
-                                    )}
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </div>
-            );
-        }
-
-        function RelationshipsPanel({ relationships, setRelationships }) {
-            const editNpc = (id, field, value) => {
-                setRelationships(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
-            };
-
-            return (
-                <div className="space-y-4">
-                    <h3 className="font-bold text-lg border-b border-slate-700 pb-2">Vínculos</h3>
-                    {relationships.length === 0 ? (
-                        <p className="text-slate-500 italic text-sm text-center">Ninguém cruzou seu caminho de forma significativa ainda.</p>
-                    ) : (
-                        <ul className="space-y-4">
-                            {relationships.map(npc => (
-                                <li key={npc.id} className="bg-slate-700/30 p-3 rounded-lg border border-slate-600">
-                                    <div className="flex items-center gap-3 mb-2">
-                                        <div className="w-10 h-10 bg-slate-600 rounded-full flex-shrink-0 overflow-hidden border border-slate-500">
-                                            {npc.image ? <img src={npc.image} className="w-full h-full object-cover"/> : <div className="w-full h-full flex items-center justify-center text-[10px]">NPC</div>}
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <div className="font-bold text-sm truncate text-cyan-300">{npc.name}</div>
-                                            <div className={`text-xs font-semibold ${npc.status.toLowerCase().includes('inimigo') ? 'text-red-400' : npc.status.toLowerCase().includes('aliado') ? 'text-green-400' : 'text-slate-400'}`}>
-                                                {npc.status}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="space-y-2 mt-2">
-                                        <div>
-                                            <label className="text-[10px] uppercase text-slate-500 font-bold block">Personalidade</label>
-                                            <input type="text" value={npc.personality || ''} onChange={(e) => editNpc(npc.id, 'personality', e.target.value)} className="w-full bg-slate-800 text-xs p-1 rounded border border-slate-600" />
-                                        </div>
-                                        <div>
-                                            <label className="text-[10px] uppercase text-slate-500 font-bold block">História</label>
-                                            <textarea value={npc.backstory || ''} onChange={(e) => editNpc(npc.id, 'backstory', e.target.value)} className="w-full bg-slate-800 text-xs p-1 rounded border border-slate-600 resize-none h-16" />
-                                        </div>
-                                    </div>
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </div>
-            );
-        }
-
-        function MusicPanel({ musicFiles, handleUpload, activeCategory, setActiveCategory }) {
-            const categories = [
-                { id: 'padrao', label: 'Exploração Padrão', icon: '🌲' },
-                { id: 'combate', label: 'Combate Geral', icon: '⚔️' },
-                { id: 'boss', label: 'Batalha de Chefe', icon: '💀' },
-                { id: 'calmo', label: 'Descanso/Taverna', icon: '🔥' },
-                { id: 'investigacao', label: 'Mistério', icon: '🔎' },
-                { id: 'tensao', label: 'Tensão/Horror', icon: '⚠️' }
-            ];
-
-            return (
-                <div className="space-y-4">
-                    <h3 className="font-bold text-lg border-b border-slate-700 pb-2">Trilha Sonora</h3>
-                    <p className="text-xs text-slate-400 mb-4">A IA mudará a faixa automaticamente com base na cena. Faça o upload das suas músicas (MP3/WAV) para cada situação.</p>
-                    
-                    <div className="space-y-3">
-                        {categories.map(cat => (
-                            <div key={cat.id} className={`p-3 rounded border ${activeCategory === cat.id ? 'bg-indigo-900/40 border-indigo-500' : 'bg-slate-700/30 border-slate-600'}`}>
-                                <div className="flex justify-between items-center mb-2">
-                                    <span className="font-semibold text-sm flex items-center gap-2">{cat.icon} {cat.label}</span>
-                                    {musicFiles[cat.id] && <span className="text-[10px] bg-green-900/50 text-green-400 px-2 py-1 rounded">Carregada</span>}
-                                </div>
-                                <div className="flex items-center gap-2 mt-1">
-                                    <label className="text-xs bg-slate-600 hover:bg-slate-500 px-2 py-1 rounded cursor-pointer transition flex-1 text-center">
-                                        Escolher Arquivo
-                                        <input type="file" accept="audio/*" onChange={(e) => handleUpload(cat.id, e.target.files[0])} className="hidden" />
-                                    </label>
-                                    {musicFiles[cat.id] && (
-                                        <button onClick={() => setActiveCategory(cat.id)} className="text-xs bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded">
-                                            Testar
-                                        </button>
-                                    )}
-                                </div>
-                            </div>
-                        ))}
+                    <div className="flex-1">
+                      <h3 className="font-bold text-lg text-white mb-1 flex items-center justify-between">
+                        {npc.name}
+                        <button onClick={() => generateNpcImage(npc.id, npc.appearance || 'A generic character', genre)} className="text-xs text-purple-400 border border-purple-900 bg-purple-950/30 px-2 py-1 rounded flex items-center gap-1 hover:bg-purple-900" title="Gerar Foto com IA">
+                          <ImageIcon size={12}/> Gerar
+                        </button>
+                      </h3>
+                      <div className="w-full bg-slate-800 h-2 rounded-full mt-2 relative overflow-hidden">
+                         {/* Barra de afinidade visual de -100 a 100 */}
+                        <div className={`absolute top-0 bottom-0 left-1/2 transition-all ${npc.affinity > 0 ? 'bg-emerald-500' : 'bg-red-500 right-1/2 origin-right'}`} style={{ width: `${Math.abs(npc.affinity || 0)}%`, [npc.affinity > 0 ? 'left' : 'right']: '50%' }}></div>
+                        <div className="absolute left-1/2 top-0 bottom-0 w-px bg-slate-600"></div>
+                      </div>
+                      <div className="text-[10px] text-center mt-1 text-slate-500">Afinidade: {npc.affinity || 0}</div>
                     </div>
+                  </div>
+                  <div className="p-4 space-y-3 text-sm flex-1 flex flex-col">
+                    <div>
+                      <label className="text-xs text-slate-500 uppercase font-bold block mb-1">Aparência</label>
+                      <textarea value={npc.appearance || ''} onChange={(e) => setNpcs(prev => prev.map(n => n.id === npc.id ? {...n, appearance: e.target.value} : n))} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-300 resize-none h-16 text-xs"></textarea>
+                    </div>
+                    <div>
+                      <label className="text-xs text-slate-500 uppercase font-bold block mb-1">Personalidade</label>
+                      <input type="text" value={npc.personality || ''} onChange={(e) => setNpcs(prev => prev.map(n => n.id === npc.id ? {...n, personality: e.target.value} : n))} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-slate-300 text-xs" />
+                    </div>
+                    <p className="text-xs text-slate-400 mt-2 flex-1 italic">"{npc.backstory}"</p>
+                  </div>
                 </div>
-            );
-        }
+              ))}
+              {npcs.length === 0 && <p className="text-slate-600 italic col-span-2">Você ainda não formou vínculos significativos.</p>}
+            </div>
+          </div>
 
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
-</body>
-</html>
+          {/* TAB: MUSIC */}
+          <div className={`${activeTab === 'music' ? 'block' : 'hidden'} max-w-2xl mx-auto`}>
+            <h2 className="text-2xl font-black text-yellow-500 mb-2">Trilha Sonora Dinâmica</h2>
+            <p className="text-sm text-slate-400 mb-6 border-b border-slate-800 pb-4">Carregue arquivos de áudio do seu dispositivo para tocar durante diferentes momentos da campanha. (Aviso: As músicas não são exportadas no save, devem ser recarregadas a cada sessão).</p>
+            
+            <div className="space-y-4">
+              {[
+                { id: 'calmo', label: 'Ambiente Calmo / Explorando', icon: <MapPin size={18}/> },
+                { id: 'tensao', label: 'Tensão / Investigação', icon: <Brain size={18}/> },
+                { id: 'combate', label: 'Combate Padrão', icon: <Shield size={18}/> },
+                { id: 'boss', label: 'Luta contra Chefe', icon: <Zap size={18} className="text-red-500"/> }
+              ].map(track => (
+                <div key={track.id} className={`flex items-center justify-between p-4 rounded-lg border ${currentTrackName === track.id ? 'bg-yellow-900/20 border-yellow-500' : 'bg-slate-900 border-slate-800'}`}>
+                  <div className="flex items-center gap-3">
+                    <button onClick={() => playMusic(track.id)} className={`w-10 h-10 rounded-full flex items-center justify-center ${currentTrackName === track.id ? 'bg-yellow-500 text-slate-900' : 'bg-slate-800 text-white hover:bg-slate-700'}`}>
+                      {currentTrackName === track.id ? <Square size={16} fill="currentColor"/> : <Play size={16} fill="currentColor" className="ml-1"/>}
+                    </button>
+                    <div>
+                      <div className="font-bold text-sm flex items-center gap-2">{track.icon} {track.label}</div>
+                      <div className="text-xs text-slate-500">{musicTracks[track.id] ? 'Faixa carregada.' : 'Nenhuma faixa.'}</div>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="cursor-pointer bg-slate-800 hover:bg-slate-700 text-xs px-3 py-2 rounded text-slate-300 border border-slate-700">
+                      Upload
+                      <input type="file" accept="audio/*" className="hidden" onChange={(e) => handleMusicUpload(track.id, e)} />
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* TAB: SETTINGS */}
+          <div className={`${activeTab === 'settings' ? 'block' : 'hidden'} max-w-xl mx-auto space-y-6`}>
+            <h2 className="text-2xl font-black text-slate-300 mb-6 border-b border-slate-800 pb-2">Sistema</h2>
+            
+            <div className="bg-slate-900 p-4 rounded-lg border border-slate-800">
+              <h3 className="font-bold text-sm mb-2 text-slate-400">Gemini API Key</h3>
+              <input type="password" value={apiKeyInput} onChange={e => setApiKeyInput(e.target.value)} placeholder="Cole sua chave aqui..." className="w-full bg-slate-950 border border-slate-700 rounded p-2 text-white font-mono text-sm" />
+              <p className="text-xs text-slate-500 mt-2">Necessária para a IA funcionar se você jogar o arquivo fora deste ambiente.</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <button onClick={saveGame} className="flex items-center justify-center gap-2 bg-blue-900/30 hover:bg-blue-800/50 text-blue-400 border border-blue-900 p-4 rounded-lg font-bold transition-all">
+                <Save size={18}/> Salvar Local
+              </button>
+              <button onClick={loadGame} className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 p-4 rounded-lg font-bold transition-all">
+                <Upload size={18}/> Carregar Local
+              </button>
+              <button onClick={exportGame} className="flex items-center justify-center gap-2 bg-purple-900/30 hover:bg-purple-800/50 text-purple-400 border border-purple-900 p-4 rounded-lg font-bold transition-all">
+                <Download size={18}/> Exportar Save
+              </button>
+              <label className="flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 p-4 rounded-lg font-bold cursor-pointer transition-all">
+                <Upload size={18}/> Importar Save
+                <input type="file" accept=".json" className="hidden" onChange={importGame} />
+              </label>
+            </div>
+
+            <div className="bg-slate-900 p-4 rounded-lg border border-red-900/50 mt-8">
+              <button onClick={() => { if(window.confirm('Tem certeza? Todo o progresso não salvo será perdido.')) setGameState('menu'); }} className="text-red-500 hover:text-red-400 font-bold text-sm w-full text-left">
+                Sair para o Menu Principal
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      {/* BOTTOM INPUT BAR (Sempre visível se na aba Story) */}
+      <div className={`h-auto md:h-24 bg-slate-900 border-t border-slate-800 p-2 md:p-4 shrink-0 transition-transform duration-300 ${activeTab !== 'story' ? 'translate-y-full absolute bottom-0 left-0 right-0 md:static md:translate-y-0' : 'relative z-10'}`}>
+        <div className="max-w-4xl mx-auto flex flex-col md:flex-row gap-2 h-full">
+          <div className="flex bg-slate-950 rounded-lg overflow-hidden border border-slate-700 shrink-0 h-10 md:h-full">
+            <button onClick={() => setInputMode('acao')} className={`px-3 md:px-4 text-xs md:text-sm font-bold transition-colors ${inputMode === 'acao' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>Ação</button>
+            <button onClick={() => setInputMode('fala')} className={`px-3 md:px-4 text-xs md:text-sm font-bold transition-colors border-l border-r border-slate-800 ${inputMode === 'fala' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>Fala</button>
+            <button onClick={() => setInputMode('descricao')} className={`px-3 md:px-4 text-xs md:text-sm font-bold transition-colors ${inputMode === 'descricao' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}>Mestre?</button>
+          </div>
+          <div className="flex-1 flex gap-2">
+            <input 
+              type="text" 
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleAction()}
+              placeholder={inputMode === 'acao' ? 'O que você faz?' : inputMode === 'fala' ? 'O que você diz?' : 'O que você quer investigar/saber?'}
+              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 text-white focus:outline-none focus:border-blue-500 h-12 md:h-full"
+            />
+            <button onClick={handleAction} disabled={loading || !inputText.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white w-12 md:w-16 rounded-lg flex items-center justify-center shrink-0 h-12 md:h-full transition-colors">
+              <Send size={20} className={inputText.trim() ? 'ml-1' : ''} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  );
+};
+
+export default App;
