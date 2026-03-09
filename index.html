@@ -59,24 +59,25 @@
 
         // --- INTEGRAÇÃO COM GEMINI API ---
         
-        // Helper para retentativas com backoff exponencial
-        const fetchWithBackoff = async (url, options) => {
-            const delays = [1000, 2000, 4000, 8000, 16000];
+        const fetchWithBackoff = async (requestFn) => {
+            const delays = [1000, 2000, 4000, 8000];
             for (let i = 0; i <= delays.length; i++) {
                 try {
-                    const response = await fetch(url, options);
-                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
-                    return await response.json();
+                    return await requestFn();
                 } catch (error) {
+                    // Não retenta para erros críticos de rota ou autenticação
+                    if (error.message.includes('404') || error.message.includes('401')) throw error;
                     if (i === delays.length) throw error;
                     await new Promise(r => setTimeout(r, delays[i]));
                 }
             }
         };
 
+        // Modelos ativos em memória
+        let activeTextModel = 'gemini-1.5-flash';
+        let activeImageModel = 'imagen-3.0-generate-001';
+
         const callGemini = async (apiKey, prompt, systemInstruction, isJson = true) => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
-            
             const payload = {
                 contents: [{ parts: [{ text: prompt }] }]
             };
@@ -89,38 +90,70 @@
                 payload.generationConfig = { responseMimeType: "application/json" };
             }
 
-            try {
-                const data = await fetchWithBackoff(url, {
+            const makeRequest = async (modelName) => {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+                const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                return await response.json();
+            };
+
+            try {
+                const data = await fetchWithBackoff(() => makeRequest(activeTextModel));
                 const text = data.candidates[0].content.parts[0].text;
                 return isJson ? JSON.parse(text) : text;
             } catch (error) {
+                // Fallback inteligente: se o ambiente Canvas bloquear o modelo de produção, troca dinamicamente.
+                if (error.message.includes('404') && activeTextModel === 'gemini-1.5-flash') {
+                    activeTextModel = 'gemini-2.5-flash-preview-09-2025';
+                    console.log("Fallback Ativado: Ambiente bloqueou 1.5, alterando para modelo preview...");
+                    const fallbackData = await makeRequest(activeTextModel);
+                    const text = fallbackData.candidates[0].content.parts[0].text;
+                    return isJson ? JSON.parse(text) : text;
+                }
                 console.error("Falha na chamada de texto:", error);
                 throw error;
             }
         };
 
         const callGeminiImage = async (apiKey, prompt) => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
             const payload = { instances: { prompt: prompt }, parameters: { sampleCount: 1 } };
             
-            try {
-                const data = await fetchWithBackoff(url, {
+            const makeRequest = async (modelName) => {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:predict?key=${apiKey}`;
+                const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                return await response.json();
+            };
+
+            try {
+                const data = await fetchWithBackoff(() => makeRequest(activeImageModel));
                 return `data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`;
             } catch (error) {
+                if (error.message.includes('404') && activeImageModel === 'imagen-3.0-generate-001') {
+                    activeImageModel = 'imagen-4.0-generate-001';
+                    try {
+                        const fallbackData = await makeRequest(activeImageModel);
+                        return `data:image/png;base64,${fallbackData.predictions[0].bytesBase64Encoded}`;
+                    } catch (fallbackError) {
+                        console.error("Erro no fallback de imagem:", fallbackError);
+                        return null;
+                    }
+                }
                 console.error("Erro ao gerar imagem:", error);
                 return null;
             }
         };
 
         const callGeminiTTS = async (apiKey, text) => {
+            // O modelo TTS continua sendo preview interno.
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
             const payload = {
                 contents: [{ parts: [{ text: text }] }],
@@ -131,15 +164,20 @@
                 model: "gemini-2.5-flash-preview-tts"
             };
             try {
-                const data = await fetchWithBackoff(url, {
+                const response = await fetch(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload) 
                 });
                 
+                if (!response.ok) {
+                    if (response.status === 404) throw new Error("Modelo TTS indisponível para chaves públicas.");
+                    throw new Error(`API Error: ${response.status}`);
+                }
+
+                const data = await response.json();
                 const base64 = data.candidates[0].content.parts[0].inlineData.data;
                 
-                // Conversão de PCM Base64 para WAV Blob para reprodução no navegador
                 const binaryString = atob(base64);
                 const bytes = new Uint8Array(binaryString.length);
                 for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
@@ -155,23 +193,20 @@
                 writeString(view, 8, 'WAVE');
                 writeString(view, 12, 'fmt ');
                 view.setUint32(16, 16, true);
-                view.setUint16(20, 1, true); // PCM format
-                view.setUint16(22, 1, true); // Mono
+                view.setUint16(20, 1, true); 
+                view.setUint16(22, 1, true); 
                 view.setUint32(24, sampleRate, true);
-                view.setUint32(28, sampleRate * 2, true); // Byte rate
-                view.setUint16(32, 2, true); // Block align
-                view.setUint16(34, 16, true); // Bits per sample
+                view.setUint32(28, sampleRate * 2, true); 
+                view.setUint16(32, 2, true); 
+                view.setUint16(34, 16, true); 
                 writeString(view, 36, 'data');
                 view.setUint32(40, pcmData.length * 2, true);
-                
-                let offset = 44;
-                for (let i = 0; i < pcmData.length; i++) { view.setInt16(offset, pcmData[i], true); offset += 2; }
                 
                 const blob = new Blob([view], { type: 'audio/wav' });
                 return URL.createObjectURL(blob);
             } catch (error) {
                 console.error("Erro ao gerar áudio:", error);
-                return null;
+                return null; 
             }
         };
 
@@ -202,7 +237,6 @@
             const [audioTracks, setAudioTracks] = useState({});
             const audioRef = useRef(null);
 
-            // Estados temporários de configuração
             const [setupData, setSetupData] = useState({
                 type: 'original', genre: 'Fantasia Medieval', universe: '', customDetails: '',
                 charName: '', charRace: '', charClass: '', charBg: '', charAvatar: null
@@ -229,7 +263,7 @@
                 try {
                     const saved = await loadFromDB('autoSave');
                     if (saved) setGameState(saved);
-                    else alert("Nenhum save encontrado.");
+                    else alert("Nenhum save encontrado no seu navegador.");
                 } catch (e) {
                     alert("Erro ao carregar save.");
                 }
@@ -264,7 +298,7 @@
 
             const handleError = (e) => {
                 if (e.message && e.message.includes('401')) {
-                    alert("Erro de Autenticação (401): A chave da API é inválida ou expirou. Verifique sua chave nas configurações iniciais.");
+                    alert("Erro de Autenticação (401): A chave da API é inválida. Verifique sua chave nas configurações iniciais.");
                 } else {
                     alert("Erro de conexão com a API: " + e.message + ". Tente novamente.");
                 }
@@ -356,20 +390,17 @@
                     
                     setGameState(prev => {
                         let newState = { ...prev };
-                        // Update Stats
                         newState.player.hp = Math.min(prev.player.maxHp, Math.max(0, prev.player.hp + (response.hpDelta || 0)));
                         newState.player.sanity = Math.min(prev.player.maxSanity, Math.max(0, prev.player.sanity + (response.sanityDelta || 0)));
                         newState.player.exp += (response.expDelta || 0);
                         newState.player.effort = Math.min(prev.player.maxEffort, Math.max(0, prev.player.effort + (response.effortDelta || 0)));
                         
-                        // Update Location & Party
                         newState.location = response.locationUpdate || prev.location;
                         let newParty = [...prev.party];
                         if (response.partyUpdates?.add) newParty = [...newParty, ...response.partyUpdates.add];
                         if (response.partyUpdates?.remove) newParty = newParty.filter(n => !response.partyUpdates.remove.includes(n));
                         newState.party = [...new Set(newParty)];
 
-                        // Update Inventory
                         let newItems = [...prev.inventory.items];
                         if (response.inventoryChanges?.remove) {
                             newItems = newItems.filter(i => !response.inventoryChanges.remove.includes(i.name));
@@ -379,7 +410,6 @@
                         }
                         newState.inventory.items = newItems;
 
-                        // Update Relationships
                         let newRels = [...prev.relationships];
                         if (response.newNPCs) {
                             response.newNPCs.forEach(npc => {
@@ -397,7 +427,6 @@
                         }
                         newState.relationships = newRels;
 
-                        // Update Story & Mood
                         newState.story = [...newStory, { role: 'system', text: response.narration }];
                         if (response.musicMood) newState.musicMood = response.musicMood;
 
@@ -405,7 +434,7 @@
                         return newState;
                     });
                 } catch (e) {
-                    setGameState(prev => ({ ...prev, story: prev.story.slice(0, -1) })); // revert user action
+                    setGameState(prev => ({ ...prev, story: prev.story.slice(0, -1) }));
                     handleError(e);
                 } finally {
                     setLoadingStr('');
@@ -424,12 +453,14 @@
                 if (!apiKey.trim()) return alert("Insira a chave da API do Gemini primeiro.");
                 setLoadingStr("Gerando imagem...");
                 const imgBase64 = await callGeminiImage(apiKey, prompt);
-                if (imgBase64) callback(imgBase64);
-                else alert("Falha ao gerar imagem.");
+                if (imgBase64) {
+                    callback(imgBase64);
+                } else {
+                    alert("Aviso: Falha ao gerar imagem. Confirme se sua API Key tem suporte e faturamento ativado para o modelo Imagen no Google AI Studio.");
+                }
                 setLoadingStr("");
             };
 
-            // VIEWS
             if (!gameState && !setupData.startedSetup) {
                 return (
                     <div className="min-h-screen flex items-center justify-center p-4">
@@ -483,7 +514,6 @@
                                 </div>
                             ) : (
                                 <div className="space-y-6">
-                                    {/* MODO DE JOGO */}
                                     <div className="space-y-2">
                                         <h3 className="text-lg font-semibold text-blue-400">1. O Mundo</h3>
                                         <div className="flex gap-4">
@@ -501,7 +531,6 @@
                                         )}
                                     </div>
 
-                                    {/* PERSONAGEM */}
                                     <div className="space-y-4">
                                         <h3 className="text-lg font-semibold text-blue-400">2. Seu Personagem</h3>
                                         
@@ -538,17 +567,13 @@
                 );
             }
 
-            // MAIN GAME INTERFACE
             const p = gameState.player;
             
             return (
                 <div className="h-screen flex flex-col bg-[#0f172a]">
-                    {/* Audio Element Hidden */}
                     <audio ref={audioRef} loop />
 
-                    {/* HEADER (Status & Local) */}
                     <header className="glass-panel shrink-0 p-3 md:p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 z-10 shadow-md">
-                        {/* Player Info */}
                         <div className="flex items-center gap-4">
                             <div className="w-12 h-12 md:w-16 md:h-16 rounded-full overflow-hidden border-2 border-slate-600 shrink-0">
                                 {p.avatar ? <img src={p.avatar} className="w-full h-full object-cover" /> : <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Icon name="user" /></div>}
@@ -573,7 +598,6 @@
                             </div>
                         </div>
 
-                        {/* Location Info */}
                         <div className="flex flex-col md:items-end w-full md:w-auto bg-slate-800/50 p-2 rounded border border-slate-700/50">
                             <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm md:text-base">
                                 <Icon name="map-pin" size={16} /> {gameState.location}
@@ -584,7 +608,6 @@
                         </div>
                     </header>
 
-                    {/* TABS NAVIGATION */}
                     <div className="flex overflow-x-auto bg-slate-900 border-b border-slate-800 shrink-0 custom-scrollbar">
                         {[
                             {id: 'historia', icon: 'book-open', label: 'História'},
@@ -600,7 +623,6 @@
                         ))}
                     </div>
 
-                    {/* MAIN CONTENT AREA */}
                     <main className="flex-1 overflow-hidden relative">
                         {currentTab === 'historia' && (
                             <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} apiKey={apiKey} />
@@ -640,8 +662,6 @@
             );
         };
 
-        // --- SUBCOMPONENTS ---
-
         const StoryTab = ({ story, onAction, isLoading, apiKey }) => {
             const endRef = useRef(null);
             const [inputText, setInputText] = useState('');
@@ -679,7 +699,7 @@
                     return;
                 }
                 setPlayingAudio('loading');
-                const cleanText = text.replace(/<[^>]*>?/gm, ''); // Remove tags HTML
+                const cleanText = text.replace(/<[^>]*>?/gm, ''); 
                 const audioUrl = await callGeminiTTS(apiKey, cleanText);
                 if (audioUrl) {
                     const audio = new Audio(audioUrl);
@@ -688,7 +708,7 @@
                     setPlayingAudio(audio);
                 } else {
                     setPlayingAudio(null);
-                    alert("Aviso: Falha ao gerar o áudio. Verifique sua chave ou tente novamente.");
+                    alert("O modelo de voz é uma função experimental e ainda não está disponível para o público. Ele funciona apenas no ambiente de testes do Google.");
                 }
             };
 
@@ -878,7 +898,12 @@
                 updateRel(idx, { isGeneratingImg: true });
                 const prompt = `Retrato de personagem de RPG: ${npc.name}. Aparelho: ${npc.appearance || 'aparência genérica'}. Estilo de arte conceitual de jogo, focado no rosto.`;
                 const img = await callGeminiImage(apiKey, prompt);
-                updateRel(idx, { avatar: img, isGeneratingImg: false });
+                if (img) {
+                    updateRel(idx, { avatar: img, isGeneratingImg: false });
+                } else {
+                    updateRel(idx, { isGeneratingImg: false });
+                    alert("Aviso: Não foi possível gerar a imagem no GitHub. Verifique as configurações de faturamento da sua API Key.");
+                }
             };
 
             return (
@@ -890,7 +915,6 @@
                             rels.map((npc, idx) => (
                                 <div key={idx} className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-col md:flex-row gap-6 items-start">
                                     
-                                    {/* Avatar e Ações */}
                                     <div className="w-24 h-24 md:w-32 md:h-32 shrink-0 bg-slate-900 rounded-lg overflow-hidden relative border border-slate-600 group">
                                         {npc.isGeneratingImg ? (
                                             <div className="w-full h-full flex items-center justify-center"><Icon name="loader-2" className="animate-spin text-blue-500" /></div>
@@ -907,7 +931,6 @@
                                         </div>
                                     </div>
 
-                                    {/* Dados */}
                                     <div className="flex-1 w-full space-y-3">
                                         <div className="flex justify-between items-start">
                                             <div>
@@ -935,7 +958,6 @@
                         )}
                     </div>
 
-                    {/* Modal de Edição */}
                     {editingNpc && (
                         <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
                             <div className="bg-slate-800 p-6 rounded-xl border border-slate-600 max-w-lg w-full space-y-4">
@@ -972,8 +994,6 @@
             const handleAudioUpload = (e, cat) => {
                 const file = e.target.files[0];
                 if (!file) return;
-                // Usando URL de objeto para tocar o arquivo local sem estourar cota de armazenamento de dados imediatamente.
-                // Nota: URLs de objeto são perdidas no refresh. Para persistência real, precisaríamos salvar o binário no IndexedDB.
                 const url = URL.createObjectURL(file);
                 setAudioTracks(prev => ({...prev, [cat]: url}));
             };
