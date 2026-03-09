@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nexus: RPG IA</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1e293b; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- SISTEMA DE BANCO DE DADOS (IndexedDB para suportar imagens e áudio grandes) ---
+        const DB_NAME = 'NexusRPGDB';
+        const STORE_NAME = 'saveGames';
+        
+        const initDB = () => {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, 1);
+                request.onupgradeneeded = (e) => e.target.result.createObjectStore(STORE_NAME);
+                request.onsuccess = (e) => resolve(e.target.result);
+                request.onerror = (e) => reject(e.target.error);
+            });
+        };
+
+        const saveToDB = async (key, data) => {
+            const db = await initDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                tx.objectStore(STORE_NAME).put(data, key);
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        };
+
+        const loadFromDB = async (key) => {
+            const db = await initDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction(STORE_NAME, 'readonly');
+                const request = tx.objectStore(STORE_NAME).get(key);
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+        };
+
+        // --- INTEGRAÇÃO COM GEMINI API ---
+        const callGemini = async (apiKey, prompt, systemInstruction, isJson = true) => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                systemInstruction: { parts: [{ text: systemInstruction }] },
+            };
+            
+            if (isJson) {
+                payload.generationConfig = { responseMimeType: "application/json" };
+            }
+
+            let retries = 3;
+            while (retries > 0) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                    const data = await response.json();
+                    const text = data.candidates[0].content.parts[0].text;
+                    return isJson ? JSON.parse(text) : text;
+                } catch (error) {
+                    retries--;
+                    if (retries === 0) throw error;
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
+        };
+
+        const callGeminiImage = async (apiKey, prompt) => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
+            const payload = { instances: { prompt: prompt }, parameters: { sampleCount: 1 } };
+            
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!response.ok) throw new Error(`Image API Error: ${response.status}`);
+                const data = await response.json();
+                return `data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`;
+            } catch (error) {
+                console.error("Erro ao gerar imagem:", error);
+                return null;
+            }
+        };
+
+        const callGeminiTTS = async (apiKey, text) => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+            const payload = {
+                contents: [{ parts: [{ text: text }] }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Fenrir" } } }
+                }
+            };
+            try {
+                const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                if (!response.ok) throw new Error(`TTS API Error: ${response.status}`);
+                const data = await response.json();
+                const base64 = data.candidates[0].content.parts[0].inlineData.data;
+                
+                // Conversão de PCM Base64 para WAV Blob para reprodução no navegador
+                const binaryString = atob(base64);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+                const pcmData = new Int16Array(bytes.buffer);
+                
+                const sampleRate = 24000;
+                const buffer = new ArrayBuffer(44 + pcmData.length * 2);
+                const view = new DataView(buffer);
+                const writeString = (v, o, s) => { for (let i=0; i<s.length; i++) v.setUint8(o+i, s.charCodeAt(i)); };
+                
+                writeString(view, 0, 'RIFF');
+                view.setUint32(4, 36 + pcmData.length * 2, true);
+                writeString(view, 8, 'WAVE');
+                writeString(view, 12, 'fmt ');
+                view.setUint32(16, 16, true);
+                view.setUint16(20, 1, true); // PCM format
+                view.setUint16(22, 1, true); // Mono
+                view.setUint32(24, sampleRate, true);
+                view.setUint32(28, sampleRate * 2, true); // Byte rate
+                view.setUint16(32, 2, true); // Block align
+                view.setUint16(34, 16, true); // Bits per sample
+                writeString(view, 36, 'data');
+                view.setUint32(40, pcmData.length * 2, true);
+                
+                let offset = 44;
+                for (let i = 0; i < pcmData.length; i++) { view.setInt16(offset, pcmData[i], true); offset += 2; }
+                
+                const blob = new Blob([view], { type: 'audio/wav' });
+                return URL.createObjectURL(blob);
+            } catch (error) {
+                console.error("Erro ao gerar áudio:", error);
+                return null;
+            }
+        };
+
+        // --- COMPONENTES DA INTERFACE ---
+
+        const Icon = ({ name, size = 24, className = "" }) => {
+            const iconRef = useRef(null);
+            useEffect(() => {
+                if (iconRef.current) {
+                    iconRef.current.innerHTML = '';
+                    const iconElement = document.createElement('i');
+                    iconElement.setAttribute('data-lucide', name);
+                    iconElement.setAttribute('width', size);
+                    iconElement.setAttribute('height', size);
+                    iconElement.className = className;
+                    iconRef.current.appendChild(iconElement);
+                    lucide.createIcons({ root: iconRef.current });
+                }
+            }, [name, size, className]);
+            return <span ref={iconRef} className="inline-flex items-center justify-center"></span>;
+        };
+
+        const App = () => {
+            const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
+            const [gameState, setGameState] = useState(null);
+            const [currentTab, setCurrentTab] = useState('historia');
+            const [loadingStr, setLoadingStr] = useState('');
+            const [audioTracks, setAudioTracks] = useState({});
+            const audioRef = useRef(null);
+
+            // Estados temporários de configuração
+            const [setupData, setSetupData] = useState({
+                type: 'original', genre: 'Fantasia Medieval', universe: '', customDetails: '',
+                charName: '', charRace: '', charClass: '', charBg: '', charAvatar: null
+            });
+
+            useEffect(() => {
+                if (gameState?.musicMood && audioTracks[gameState.musicMood]) {
+                    if (audioRef.current) {
+                        audioRef.current.src = audioTracks[gameState.musicMood];
+                        audioRef.current.play().catch(e => console.log("Auto-play bloqueado pelo navegador", e));
+                    }
+                }
+            }, [gameState?.musicMood, audioTracks]);
+
+            const saveGame = async (stateToSave) => {
+                try {
+                    await saveToDB('autoSave', stateToSave);
+                } catch (e) {
+                    console.error("Erro ao salvar:", e);
+                }
+            };
+
+            const loadGame = async () => {
+                try {
+                    const saved = await loadFromDB('autoSave');
+                    if (saved) setGameState(saved);
+                    else alert("Nenhum save encontrado.");
+                } catch (e) {
+                    alert("Erro ao carregar save.");
+                }
+            };
+
+            const exportSave = async () => {
+                if (!gameState) return;
+                const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(gameState));
+                const downloadAnchorNode = document.createElement('a');
+                downloadAnchorNode.setAttribute("href", dataStr);
+                downloadAnchorNode.setAttribute("download", "nexus_save_" + Date.now() + ".json");
+                document.body.appendChild(downloadAnchorNode);
+                downloadAnchorNode.click();
+                downloadAnchorNode.remove();
+            };
+
+            const importSave = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    try {
+                        const imported = JSON.parse(event.target.result);
+                        setGameState(imported);
+                        await saveToDB('autoSave', imported);
+                    } catch (err) {
+                        alert("Arquivo de save inválido.");
+                    }
+                };
+                reader.readAsText(file);
+            };
+
+            const startGame = async () => {
+                if (!apiKey) return alert("Insira a chave da API do Gemini nas configurações.");
+                if (!setupData.charName) return alert("Dê um nome ao seu personagem.");
+                
+                setLoadingStr('Gerando aventura e atributos...');
+                
+                const sysPrompt = `Você é um mestre de RPG. Crie os atributos iniciais, itens básicos e a cena inicial.
+                Jogador: ${setupData.charName}, Raça: ${setupData.charRace}, Classe: ${setupData.charClass}.
+                História de Fundo: ${setupData.charBg}.
+                Campanha: ${setupData.type === 'custom' ? `Universo: ${setupData.universe}. Detalhes: ${setupData.customDetails}` : `Gênero: ${setupData.genre}`}.
+                Retorne EXATAMENTE este JSON:
+                {
+                    "attributes": {"forca": int, "destreza": int, "inteligencia": int, "carisma": int, "constituicao": int},
+                    "skills": ["habilidade1", "habilidade2"],
+                    "inventory": [{"name": "Item inicial", "desc": "descrição", "damage": "1d4 (se arma)", "type": "arma/documento/geral"}],
+                    "location": "Nome do Local Inicial",
+                    "narration": "Texto imersivo descrevendo onde o personagem está e o que está acontecendo. Termine com um gancho para ação.",
+                    "musicMood": "ambiente_calmo"
+                }`;
+
+                try {
+                    const response = await callGemini(apiKey, "Inicie o jogo.", sysPrompt, true);
+                    
+                    const newGame = {
+                        player: {
+                            name: setupData.charName, race: setupData.charRace, class: setupData.charClass,
+                            hp: 100, maxHp: 100, sanity: 100, maxSanity: 100, exp: 0, effort: 50, maxEffort: 50,
+                            attributes: response.attributes, skills: response.skills, backstory: setupData.charBg,
+                            avatar: setupData.charAvatar
+                        },
+                        context: { type: setupData.type, genre: setupData.genre, universe: setupData.universe },
+                        location: response.location,
+                        party: [],
+                        inventory: { items: response.inventory, capacity: response.attributes.forca * 2 + 10 },
+                        relationships: [],
+                        story: [{ role: 'system', text: response.narration }],
+                        musicMood: response.musicMood || 'ambiente_calmo'
+                    };
+                    
+                    setGameState(newGame);
+                    await saveGame(newGame);
+                } catch (e) {
+                    alert("Erro ao iniciar. Verifique sua API Key. Erro: " + e.message);
+                } finally {
+                    setLoadingStr('');
+                }
+            };
+
+            const processAction = async (actionType, text) => {
+                if (!text.trim() || loadingStr) return;
+                
+                const newStory = [...gameState.story, { role: 'user', type: actionType, text: text }];
+                setGameState(prev => ({ ...prev, story: newStory }));
+                setLoadingStr('Mestre pensando...');
+
+                const sysPrompt = `Você é um mestre de RPG avançado. Analise a ação do jogador e atualize o mundo.
+                REGRAS RÍGIDAS DE RETORNO (JSON ONLY):
+                {
+                    "narration": "Sua resposta imersiva. Descreva as consequências.",
+                    "locationUpdate": "Nome do local (atualize se ele viajou, senão repita o atual)",
+                    "hpDelta": número (negativo se tomou dano, positivo se curou, 0 se nada),
+                    "sanityDelta": número,
+                    "expDelta": número (experiência ganha, 0 se nada),
+                    "effortDelta": número (gasto de stamina/mana, negativo se gastou),
+                    "inventoryChanges": { "add": [{"name":"", "desc":"", "damage":"", "type":""}], "remove": ["nome do item a remover"] },
+                    "relationshipUpdates": [{"npcName": "Nome", "affinityDelta": número, "status": "novo status curto"}],
+                    "partyUpdates": { "add": ["Nome"], "remove": ["Nome"] },
+                    "newNPCs": [{"name": "Nome", "appearance": "descrição física", "personality": "personalidade", "backstory": "história", "affinity": 50, "status": "neutro"}],
+                    "musicMood": "escolha: combate_padrao, combate_dificil, boss, ambiente_calmo, investigativo, opressivo, tensao"
+                }
+                
+                ESTADO ATUAL:
+                Jogador: Vida ${gameState.player.hp}, Sanidade ${gameState.player.sanity}.
+                Local: ${gameState.location}. Grupo: ${gameState.party.join(', ')}.
+                Inventário: ${gameState.inventory.items.map(i=>i.name).join(', ')}.
+                Últimas mensagens do histórico: ${JSON.stringify(newStory.slice(-4))}`;
+
+                const userPrompt = `O jogador escolheu [${actionType.toUpperCase()}]: "${text}"`;
+
+                try {
+                    const response = await callGemini(apiKey, userPrompt, sysPrompt, true);
+                    
+                    setGameState(prev => {
+                        let newState = { ...prev };
+                        // Update Stats
+                        newState.player.hp = Math.min(prev.player.maxHp, Math.max(0, prev.player.hp + (response.hpDelta || 0)));
+                        newState.player.sanity = Math.min(prev.player.maxSanity, Math.max(0, prev.player.sanity + (response.sanityDelta || 0)));
+                        newState.player.exp += (response.expDelta || 0);
+                        newState.player.effort = Math.min(prev.player.maxEffort, Math.max(0, prev.player.effort + (response.effortDelta || 0)));
+                        
+                        // Update Location & Party
+                        newState.location = response.locationUpdate || prev.location;
+                        let newParty = [...prev.party];
+                        if (response.partyUpdates?.add) newParty = [...newParty, ...response.partyUpdates.add];
+                        if (response.partyUpdates?.remove) newParty = newParty.filter(n => !response.partyUpdates.remove.includes(n));
+                        newState.party = [...new Set(newParty)];
+
+                        // Update Inventory
+                        let newItems = [...prev.inventory.items];
+                        if (response.inventoryChanges?.remove) {
+                            newItems = newItems.filter(i => !response.inventoryChanges.remove.includes(i.name));
+                        }
+                        if (response.inventoryChanges?.add) {
+                            newItems = [...newItems, ...response.inventoryChanges.add];
+                        }
+                        newState.inventory.items = newItems;
+
+                        // Update Relationships
+                        let newRels = [...prev.relationships];
+                        if (response.newNPCs) {
+                            response.newNPCs.forEach(npc => {
+                                if (!newRels.find(r => r.name === npc.name)) newRels.push({...npc, avatar: null});
+                            });
+                        }
+                        if (response.relationshipUpdates) {
+                            response.relationshipUpdates.forEach(update => {
+                                const relIndex = newRels.findIndex(r => r.name === update.npcName);
+                                if (relIndex > -1) {
+                                    newRels[relIndex].affinity = Math.max(0, Math.min(100, newRels[relIndex].affinity + (update.affinityDelta || 0)));
+                                    if (update.status) newRels[relIndex].status = update.status;
+                                }
+                            });
+                        }
+                        newState.relationships = newRels;
+
+                        // Update Story & Mood
+                        newState.story = [...newStory, { role: 'system', text: response.narration }];
+                        if (response.musicMood) newState.musicMood = response.musicMood;
+
+                        saveGame(newState);
+                        return newState;
+                    });
+                } catch (e) {
+                    alert("Erro ao processar turno. Tente novamente.");
+                    setGameState(prev => ({ ...prev, story: prev.story.slice(0, -1) })); // revert user action
+                } finally {
+                    setLoadingStr('');
+                }
+            };
+
+            const handleImageUpload = (e, callback) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => callback(event.target.result);
+                reader.readAsDataURL(file);
+            };
+
+            const generateAvatar = async (prompt, callback) => {
+                if (!apiKey) return alert("API Key necessária.");
+                setLoadingStr("Gerando imagem...");
+                const imgBase64 = await callGeminiImage(apiKey, prompt);
+                if (imgBase64) callback(imgBase64);
+                else alert("Falha ao gerar imagem.");
+                setLoadingStr("");
+            };
+
+            // VIEWS
+            if (!gameState && !setupData.startedSetup) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-4">
+                        <div className="glass-panel p-8 rounded-2xl max-w-md w-full text-center space-y-6">
+                            <h1 className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">NEXUS RPG</h1>
+                            <p className="text-slate-400">Inteligência Artificial Direcionando seu Destino</p>
+                            
+                            <div className="space-y-4 pt-4">
+                                <button onClick={() => setSetupData({...setupData, startedSetup: true})} className="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition">Nova Campanha</button>
+                                <button onClick={loadGame} className="w-full py-3 bg-slate-700 hover:bg-slate-600 rounded-lg font-semibold transition">Carregar Jogo Salvo</button>
+                                
+                                <div className="pt-6 border-t border-slate-700 text-left">
+                                    <label className="block text-sm font-medium mb-1">Gemini API Key</label>
+                                    <input type="password" value={apiKey} onChange={(e) => { setApiKey(e.target.value); localStorage.setItem('gemini_api_key', e.target.value); }} className="w-full bg-slate-800 border border-slate-600 rounded p-2 focus:border-blue-500 outline-none" placeholder="AIzaSy..." />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (setupData.startedSetup && !gameState) {
+                return (
+                    <div className="min-h-screen p-4 md:p-8 flex justify-center">
+                        <div className="glass-panel p-6 rounded-xl max-w-3xl w-full space-y-8 custom-scrollbar overflow-y-auto max-h-full">
+                            <h2 className="text-2xl font-bold border-b border-slate-700 pb-2">Configuração da Campanha</h2>
+                            
+                            {loadingStr ? (
+                                <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                                    <Icon name="loader-2" className="animate-spin text-blue-500" size={48} />
+                                    <p className="text-lg animate-pulse">{loadingStr}</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-6">
+                                    {/* MODO DE JOGO */}
+                                    <div className="space-y-2">
+                                        <h3 className="text-lg font-semibold text-blue-400">1. O Mundo</h3>
+                                        <div className="flex gap-4">
+                                            <button onClick={() => setSetupData({...setupData, type: 'original'})} className={`flex-1 py-2 rounded border ${setupData.type === 'original' ? 'bg-blue-600 border-blue-400' : 'border-slate-600 hover:bg-slate-800'}`}>Original</button>
+                                            <button onClick={() => setSetupData({...setupData, type: 'custom'})} className={`flex-1 py-2 rounded border ${setupData.type === 'custom' ? 'bg-purple-600 border-purple-400' : 'border-slate-600 hover:bg-slate-800'}`}>Personalizado</button>
+                                        </div>
+                                        
+                                        {setupData.type === 'original' ? (
+                                            <input type="text" placeholder="Gênero (ex: Fantasia Sombria, Cyberpunk, Sci-fi)" value={setupData.genre} onChange={e=>setSetupData({...setupData, genre: e.target.value})} className="w-full bg-slate-800 p-2 rounded" />
+                                        ) : (
+                                            <div className="space-y-2">
+                                                <input type="text" placeholder="Qual Universo? (ex: Star Wars, Senhor dos Anéis)" value={setupData.universe} onChange={e=>setSetupData({...setupData, universe: e.target.value})} className="w-full bg-slate-800 p-2 rounded" />
+                                                <textarea placeholder="Detalhes (ex: Quero que o Darth Vader seja meu mestre, o tom deve ser sombrio...)" value={setupData.customDetails} onChange={e=>setSetupData({...setupData, customDetails: e.target.value})} className="w-full bg-slate-800 p-2 rounded h-24"></textarea>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* PERSONAGEM */}
+                                    <div className="space-y-4">
+                                        <h3 className="text-lg font-semibold text-blue-400">2. Seu Personagem</h3>
+                                        
+                                        <div className="flex flex-col md:flex-row gap-6">
+                                            <div className="w-32 h-32 shrink-0 bg-slate-800 rounded-lg border border-slate-600 flex items-center justify-center overflow-hidden relative group">
+                                                {setupData.charAvatar ? (
+                                                    <img src={setupData.charAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                                                ) : <Icon name="user" size={48} className="text-slate-500" />}
+                                                
+                                                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center transition-opacity gap-2">
+                                                    <label className="cursor-pointer text-xs bg-blue-600 px-2 py-1 rounded hover:bg-blue-500">
+                                                        Upar
+                                                        <input type="file" className="hidden" accept="image/*" onChange={(e) => handleImageUpload(e, img => setSetupData({...setupData, charAvatar: img}))} />
+                                                    </label>
+                                                    <button onClick={() => generateAvatar(`Um retrato estilo RPG de ${setupData.charName}, raça ${setupData.charRace}, classe ${setupData.charClass}. Foco no rosto, alta qualidade.`, img => setSetupData({...setupData, charAvatar: img}))} className="text-xs bg-purple-600 px-2 py-1 rounded hover:bg-purple-500">Gerar IA</button>
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                <input type="text" placeholder="Nome" value={setupData.charName} onChange={e=>setSetupData({...setupData, charName: e.target.value})} className="bg-slate-800 p-2 rounded" />
+                                                <input type="text" placeholder="Raça" value={setupData.charRace} onChange={e=>setSetupData({...setupData, charRace: e.target.value})} className="bg-slate-800 p-2 rounded" />
+                                                <input type="text" placeholder="Classe / Profissão" value={setupData.charClass} onChange={e=>setSetupData({...setupData, charClass: e.target.value})} className="bg-slate-800 p-2 rounded md:col-span-2" />
+                                            </div>
+                                        </div>
+                                        <textarea placeholder="Sua história de fundo (A IA usará isso para criar sua aventura e atributos)..." value={setupData.charBg} onChange={e=>setSetupData({...setupData, charBg: e.target.value})} className="w-full bg-slate-800 p-2 rounded h-24"></textarea>
+                                    </div>
+
+                                    <button onClick={startGame} className="w-full py-4 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 rounded-lg font-bold text-lg shadow-lg">Começar Aventura</button>
+                                    <button onClick={() => setSetupData({...setupData, startedSetup: false})} className="w-full py-2 text-slate-400 hover:text-white">Voltar</button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            // MAIN GAME INTERFACE
+            const p = gameState.player;
+            
+            return (
+                <div className="h-screen flex flex-col bg-[#0f172a]">
+                    {/* Audio Element Hidden */}
+                    <audio ref={audioRef} loop />
+
+                    {/* HEADER (Status & Local) */}
+                    <header className="glass-panel shrink-0 p-3 md:p-4 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 z-10 shadow-md">
+                        {/* Player Info */}
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 md:w-16 md:h-16 rounded-full overflow-hidden border-2 border-slate-600 shrink-0">
+                                {p.avatar ? <img src={p.avatar} className="w-full h-full object-cover" /> : <div className="w-full h-full bg-slate-700 flex items-center justify-center"><Icon name="user" /></div>}
+                            </div>
+                            <div className="flex flex-col">
+                                <h2 className="font-bold text-lg leading-tight text-blue-300">{p.name}</h2>
+                                <span className="text-xs text-slate-400 mb-1">Nvl {Math.floor(p.exp/100)+1} | EXP: {p.exp}</span>
+                                <div className="flex gap-2">
+                                    <div className="w-20 md:w-24 bg-slate-800 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Vida">
+                                        <div className="bg-red-500 h-full transition-all duration-300" style={{width: `${(p.hp/p.maxHp)*100}%`}}></div>
+                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">{p.hp}/{p.maxHp}</span>
+                                    </div>
+                                    <div className="w-20 md:w-24 bg-slate-800 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Sanidade">
+                                        <div className="bg-purple-500 h-full transition-all duration-300" style={{width: `${(p.sanity/p.maxSanity)*100}%`}}></div>
+                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">{p.sanity}/{p.maxSanity}</span>
+                                    </div>
+                                    <div className="w-20 md:w-24 bg-slate-800 rounded-full h-3 relative overflow-hidden border border-slate-700" title="Esforço (Mana/Stamina)">
+                                        <div className="bg-blue-500 h-full transition-all duration-300" style={{width: `${(p.effort/p.maxEffort)*100}%`}}></div>
+                                        <span className="absolute inset-0 flex items-center justify-center text-[8px] font-bold">{p.effort}/{p.maxEffort}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Location Info */}
+                        <div className="flex flex-col md:items-end w-full md:w-auto bg-slate-800/50 p-2 rounded border border-slate-700/50">
+                            <div className="flex items-center gap-2 text-amber-400 font-semibold text-sm md:text-base">
+                                <Icon name="map-pin" size={16} /> {gameState.location}
+                            </div>
+                            <div className="text-xs text-slate-400 mt-1 flex items-center gap-1">
+                                <Icon name="users" size={12} /> Grupo: {gameState.party.length > 0 ? gameState.party.join(', ') : 'Sozinho'}
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* TABS NAVIGATION */}
+                    <div className="flex overflow-x-auto bg-slate-900 border-b border-slate-800 shrink-0 custom-scrollbar">
+                        {[
+                            {id: 'historia', icon: 'book-open', label: 'História'},
+                            {id: 'inventario', icon: 'briefcase', label: 'Inventário'},
+                            {id: 'relacionamentos', icon: 'heart-handshake', label: 'Relacionamentos'},
+                            {id: 'musica', icon: 'music', label: 'Músicas'},
+                            {id: 'sistema', icon: 'settings', label: 'Sistema'}
+                        ].map(tab => (
+                            <button key={tab.id} onClick={() => setCurrentTab(tab.id)} 
+                                className={`flex items-center gap-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors border-b-2 ${currentTab === tab.id ? 'border-blue-500 text-blue-400 bg-slate-800/50' : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-800/30'}`}>
+                                <Icon name={tab.icon} size={16} /> {tab.label}
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* MAIN CONTENT AREA */}
+                    <main className="flex-1 overflow-hidden relative">
+                        {currentTab === 'historia' && (
+                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} apiKey={apiKey} />
+                        )}
+                        {currentTab === 'inventario' && (
+                            <InventoryTab 
+                                inventory={gameState.inventory} 
+                                attributes={p.attributes} 
+                                apiKey={apiKey}
+                                updateInventory={(newItems) => {
+                                    const newState = {...gameState, inventory: {...gameState.inventory, items: newItems}};
+                                    setGameState(newState);
+                                    saveGame(newState);
+                                }}
+                            />
+                        )}
+                        {currentTab === 'relacionamentos' && (
+                            <RelationshipsTab 
+                                rels={gameState.relationships} 
+                                updateRel={(idx, data) => {
+                                    const newRels = [...gameState.relationships];
+                                    newRels[idx] = {...newRels[idx], ...data};
+                                    setGameState({...gameState, relationships: newRels});
+                                    saveGame({...gameState, relationships: newRels});
+                                }}
+                                apiKey={apiKey}
+                            />
+                        )}
+                        {currentTab === 'musica' && (
+                            <MusicTab audioTracks={audioTracks} setAudioTracks={setAudioTracks} currentMood={gameState.musicMood} />
+                        )}
+                        {currentTab === 'sistema' && (
+                            <SystemTab player={p} exportSave={exportSave} importSave={importSave} />
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        // --- SUBCOMPONENTS ---
+
+        const StoryTab = ({ story, onAction, isLoading, apiKey }) => {
+            const endRef = useRef(null);
+            const [inputText, setInputText] = useState('');
+            const [actionType, setActionType] = useState('ação');
+            const [hints, setHints] = useState([]);
+            const [isFetchingHints, setIsFetchingHints] = useState(false);
+            const [playingAudio, setPlayingAudio] = useState(null);
+
+            useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [story, isLoading, hints]);
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onAction(actionType, inputText);
+                setInputText('');
+                setHints([]);
+            };
+
+            const handleGetHints = async () => {
+                if (!apiKey) return alert("API Key necessária para dicas.");
+                setIsFetchingHints(true);
+                const sysPrompt = `Analise a última narração e sugira 3 opções curtas de ação criativas para o jogador (máx 5 palavras cada). Retorne JSON: {"hints": ["opção 1", "opção 2", "opção 3"]}`;
+                const promptText = `Última narração: ${story[story.length - 1]?.text || 'Início da aventura'}`;
+                try {
+                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
+                    if (res && res.hints) setHints(res.hints);
+                } catch (e) { console.error(e); }
+                setIsFetchingHints(false);
+            };
+
+            const handlePlayTTS = async (text) => {
+                if (playingAudio) {
+                    if (playingAudio !== 'loading') playingAudio.pause();
+                    setPlayingAudio(null);
+                    return;
+                }
+                if (!apiKey) return alert("API Key necessária para narração em áudio.");
+                setPlayingAudio('loading');
+                const cleanText = text.replace(/<[^>]*>?/gm, ''); // Remove tags HTML
+                const audioUrl = await callGeminiTTS(apiKey, cleanText);
+                if (audioUrl) {
+                    const audio = new Audio(audioUrl);
+                    audio.onended = () => setPlayingAudio(null);
+                    audio.play();
+                    setPlayingAudio(audio);
+                } else {
+                    setPlayingAudio(null);
+                }
+            };
+
+            return (
+                <div className="h-full flex flex-col relative">
+                    <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar">
+                        {story.map((msg, i) => (
+                            <div key={i} className={`flex flex-col max-w-4xl mx-auto ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                {msg.role === 'system' ? (
+                                    <div className="bg-slate-800/80 border border-slate-700 rounded-2xl rounded-tl-none p-4 md:p-5 shadow-sm text-slate-200 leading-relaxed text-[15px] md:text-base relative group">
+                                        <p dangerouslySetInnerHTML={{__html: msg.text.replace(/\n/g, '<br/>')}}></p>
+                                        <button onClick={() => handlePlayTTS(msg.text)} className="absolute -right-3 -top-3 bg-purple-600 hover:bg-purple-500 text-white p-2 rounded-full shadow-lg opacity-0 group-hover:opacity-100 transition-opacity" title="✨ Voz do Mestre">
+                                            <Icon name={playingAudio === 'loading' ? 'loader-2' : playingAudio ? 'square' : 'volume-2'} size={14} className={playingAudio === 'loading' ? 'animate-spin' : ''} />
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className={`rounded-2xl rounded-tr-none p-3 shadow-sm max-w-[85%] ${
+                                        msg.type === 'fala' ? 'bg-indigo-900/60 border border-indigo-700/50 text-indigo-100' : 
+                                        msg.type === 'observação' ? 'bg-emerald-900/60 border border-emerald-700/50 text-emerald-100' :
+                                        'bg-blue-900/60 border border-blue-700/50 text-blue-100'
+                                    }`}>
+                                        <span className="text-[10px] uppercase opacity-60 font-bold block mb-1">{msg.type}</span>
+                                        <p>{msg.text}</p>
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                        {isLoading && (
+                            <div className="flex max-w-4xl mx-auto items-start">
+                                <div className="bg-slate-800/50 border border-slate-700 rounded-2xl rounded-tl-none p-4 flex items-center gap-3">
+                                    <Icon name="loader-2" className="animate-spin text-blue-400" size={18} />
+                                    <span className="text-slate-400 text-sm animate-pulse">{isLoading}</span>
+                                </div>
+                            </div>
+                        )}
+                        <div ref={endRef} className="h-4"></div>
+                    </div>
+
+                    <div className="shrink-0 p-4 glass-panel border-t-0 pb-safe flex flex-col">
+                        {hints.length > 0 && (
+                            <div className="max-w-4xl mx-auto w-full mb-3 flex flex-wrap gap-2">
+                                {hints.map((hint, idx) => (
+                                    <button key={idx} onClick={() => setInputText(hint)} className="bg-blue-900/50 hover:bg-blue-800/70 border border-blue-700/50 text-blue-200 text-xs px-3 py-1.5 rounded-full transition-colors">
+                                        ✨ {hint}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        <form onSubmit={handleSubmit} className="max-w-4xl mx-auto w-full flex flex-col md:flex-row gap-2 relative">
+                            <select value={actionType} onChange={e=>setActionType(e.target.value)} className="bg-slate-800 border border-slate-600 text-sm rounded-lg p-2 md:w-32 outline-none focus:border-blue-500">
+                                <option value="ação">Ação</option>
+                                <option value="fala">Fala</option>
+                                <option value="observação">Observar/Info</option>
+                            </select>
+                            <input 
+                                type="text" 
+                                value={inputText} 
+                                onChange={e=>setInputText(e.target.value)} 
+                                placeholder="O que você faz?" 
+                                disabled={!!isLoading}
+                                className="flex-1 bg-slate-900/80 border border-slate-600 rounded-lg p-3 outline-none focus:border-blue-500 placeholder-slate-500 disabled:opacity-50"
+                            />
+                            <button type="button" onClick={handleGetHints} disabled={!!isLoading || isFetchingHints} className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-amber-300 p-3 rounded-lg transition-colors flex items-center justify-center min-w-[50px]" title="✨ Intuição">
+                                <Icon name={isFetchingHints ? 'loader-2' : 'sparkles'} size={20} className={isFetchingHints ? 'animate-spin' : ''} />
+                            </button>
+                            <button type="submit" disabled={!inputText.trim() || !!isLoading} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white p-3 rounded-lg transition-colors flex items-center justify-center min-w-[50px]">
+                                <Icon name="send" size={20} />
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const InventoryTab = ({ inventory, attributes, apiKey, updateInventory }) => {
+            const [selectedDoc, setSelectedDoc] = useState(null);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const totalItems = inventory.items.length;
+            const overload = totalItems > inventory.capacity;
+
+            const handleAnalyzeItem = async () => {
+                if (!apiKey) return alert("API Key necessária para análise.");
+                setIsAnalyzing(true);
+                const sysPrompt = `Você é um sábio narrador. Crie um parágrafo fascinante de lore, lenda ou propriedade mágica secreta sobre este item. Retorne JSON: {"lore": "texto gerado aqui"}`;
+                const promptText = `Item: ${selectedDoc.name}. Descrição Base: ${selectedDoc.desc}`;
+                try {
+                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
+                    if (res && res.lore) {
+                        const newItems = inventory.items.map(item => 
+                            item.name === selectedDoc.name ? { ...item, lore: res.lore } : item
+                        );
+                        updateInventory(newItems);
+                        setSelectedDoc({ ...selectedDoc, lore: res.lore });
+                    }
+                } catch (e) { console.error(e); }
+                setIsAnalyzing(false);
+            };
+
+            return (
+                <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar relative">
+                    <div className="max-w-5xl mx-auto space-y-6">
+                        <div className="flex justify-between items-center bg-slate-800/50 p-4 rounded-xl border border-slate-700">
+                            <div>
+                                <h2 className="text-xl font-bold flex items-center gap-2"><Icon name="backpack" /> Mochila</h2>
+                                <p className="text-sm text-slate-400">Limite baseado na Força: {attributes?.forca || 0}</p>
+                            </div>
+                            <div className="text-right">
+                                <span className={`text-2xl font-black ${overload ? 'text-red-500' : 'text-emerald-400'}`}>{totalItems}</span>
+                                <span className="text-slate-500"> / {inventory.capacity} slots</span>
+                            </div>
+                        </div>
+
+                        {inventory.items.length === 0 ? (
+                            <div className="text-center p-12 text-slate-500 border-2 border-dashed border-slate-700 rounded-xl">Mochila vazia.</div>
+                        ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {inventory.items.map((item, idx) => (
+                                    <div key={idx} className="bg-slate-800 border border-slate-700 hover:border-blue-500 transition-colors rounded-xl p-4 flex flex-col relative group cursor-pointer" onClick={() => setSelectedDoc(item)}>
+                                        <div className="flex justify-between items-start mb-2">
+                                            <h3 className="font-bold text-amber-200">{item.name}</h3>
+                                            <Icon name={item.type === 'arma' ? 'sword' : item.type === 'documento' ? 'file-text' : 'package'} size={18} className="text-slate-400" />
+                                        </div>
+                                        <p className="text-sm text-slate-400 flex-1">{item.desc}</p>
+                                        {item.damage && <div className="mt-3 text-xs bg-red-900/30 text-red-300 px-2 py-1 rounded inline-block w-max self-start border border-red-800/50">Dano: {item.damage}</div>}
+                                        <div className="mt-2 text-xs text-blue-400 flex items-center gap-1"><Icon name="search" size={12}/> Clique para inspecionar</div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {selectedDoc && (
+                        <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+                            <div className="bg-slate-800 border border-slate-600 text-slate-100 p-8 rounded-xl shadow-2xl max-w-lg w-full relative">
+                                <button onClick={()=>setSelectedDoc(null)} className="absolute top-4 right-4 text-slate-400 hover:text-white"><Icon name="x" /></button>
+                                <h3 className="text-2xl font-bold mb-4 border-b border-slate-700 pb-2 flex items-center gap-2">
+                                    <Icon name={selectedDoc.type === 'arma' ? 'sword' : selectedDoc.type === 'documento' ? 'file-text' : 'package'} className="text-amber-400"/> {selectedDoc.name}
+                                </h3>
+                                
+                                <div className="space-y-4">
+                                    {selectedDoc.type === 'documento' && (
+                                        <div className="bg-[#fdf6e3] text-slate-900 p-4 rounded font-serif text-sm">
+                                            <p className="whitespace-pre-wrap">{selectedDoc.content || selectedDoc.desc || "O texto está ilegível."}</p>
+                                        </div>
+                                    )}
+                                    {selectedDoc.type !== 'documento' && (
+                                        <p className="text-slate-300">{selectedDoc.desc}</p>
+                                    )}
+                                    
+                                    {selectedDoc.damage && <div className="text-sm font-bold text-red-400">Dano da Arma: {selectedDoc.damage}</div>}
+                                    
+                                    {selectedDoc.lore ? (
+                                        <div className="bg-purple-900/20 border border-purple-800/40 p-4 rounded-lg mt-4">
+                                            <h4 className="text-purple-300 text-xs uppercase font-bold mb-2 flex items-center gap-1"><Icon name="sparkles" size={14}/> Conhecimento Oculto</h4>
+                                            <p className="text-sm text-purple-100 italic">{selectedDoc.lore}</p>
+                                        </div>
+                                    ) : (
+                                        <button onClick={handleAnalyzeItem} disabled={isAnalyzing} className="w-full mt-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-colors">
+                                            {isAnalyzing ? <Icon name="loader-2" className="animate-spin" size={16}/> : <Icon name="sparkles" size={16}/>}
+                                            {isAnalyzing ? 'Analisando Essência...' : '✨ Inspecionar Artefato'}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const RelationshipsTab = ({ rels, updateRel, apiKey }) => {
+            const [editingNpc, setEditingNpc] = useState(null);
+
+            const handleImgUpload = (e, idx) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (event) => updateRel(idx, { avatar: event.target.result });
+                reader.readAsDataURL(file);
+            };
+
+            const genNpcImage = async (idx, npc) => {
+                if (!apiKey) return alert("API Key necessária.");
+                updateRel(idx, { isGeneratingImg: true });
+                const prompt = `Retrato de personagem de RPG: ${npc.name}. Aparelho: ${npc.appearance || 'aparência genérica'}. Estilo de arte conceitual de jogo, focado no rosto.`;
+                const img = await callGeminiImage(apiKey, prompt);
+                updateRel(idx, { avatar: img, isGeneratingImg: false });
+            };
+
+            return (
+                <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar">
+                    <div className="max-w-5xl mx-auto space-y-4">
+                        {rels.length === 0 ? (
+                            <div className="text-center p-12 text-slate-500 border-2 border-dashed border-slate-700 rounded-xl">Você ainda não conhece ninguém importante.</div>
+                        ) : (
+                            rels.map((npc, idx) => (
+                                <div key={idx} className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-col md:flex-row gap-6 items-start">
+                                    
+                                    {/* Avatar e Ações */}
+                                    <div className="w-24 h-24 md:w-32 md:h-32 shrink-0 bg-slate-900 rounded-lg overflow-hidden relative border border-slate-600 group">
+                                        {npc.isGeneratingImg ? (
+                                            <div className="w-full h-full flex items-center justify-center"><Icon name="loader-2" className="animate-spin text-blue-500" /></div>
+                                        ) : npc.avatar ? (
+                                            <img src={npc.avatar} className="w-full h-full object-cover" />
+                                        ) : (
+                                            <div className="w-full h-full flex flex-col items-center justify-center text-slate-600">
+                                                <Icon name="user" size={32} />
+                                            </div>
+                                        )}
+                                        <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                            <label className="text-[10px] bg-blue-600 px-2 py-1 rounded cursor-pointer hover:bg-blue-500">Upar Imagem<input type="file" hidden accept="image/*" onChange={(e)=>handleImgUpload(e, idx)} /></label>
+                                            <button onClick={()=>genNpcImage(idx, npc)} className="text-[10px] bg-purple-600 px-2 py-1 rounded hover:bg-purple-500">Gerar IA</button>
+                                        </div>
+                                    </div>
+
+                                    {/* Dados */}
+                                    <div className="flex-1 w-full space-y-3">
+                                        <div className="flex justify-between items-start">
+                                            <div>
+                                                <h3 className="text-xl font-bold text-blue-300">{npc.name}</h3>
+                                                <p className="text-sm text-slate-400 capitalize">{npc.status}</p>
+                                            </div>
+                                            <button onClick={()=>setEditingNpc({idx, ...npc})} className="text-slate-400 hover:text-white p-2"><Icon name="edit" size={16}/></button>
+                                        </div>
+
+                                        <div className="space-y-1">
+                                            <div className="flex justify-between text-xs font-semibold text-slate-300">
+                                                <span>Afinidade</span>
+                                                <span>{npc.affinity}%</span>
+                                            </div>
+                                            <div className="w-full bg-slate-900 rounded-full h-2">
+                                                <div className={`h-full rounded-full ${npc.affinity > 70 ? 'bg-emerald-500' : npc.affinity < 30 ? 'bg-red-500' : 'bg-yellow-500'}`} style={{width: `${Math.max(0, Math.min(100, npc.affinity))}%`}}></div>
+                                            </div>
+                                        </div>
+
+                                        <p className="text-sm text-slate-300 italic">"{npc.personality || 'Desconhecida'}"</p>
+                                        <p className="text-sm text-slate-400 line-clamp-2">{npc.backstory || 'Sem histórico conhecido.'}</p>
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+
+                    {/* Modal de Edição */}
+                    {editingNpc && (
+                        <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+                            <div className="bg-slate-800 p-6 rounded-xl border border-slate-600 max-w-lg w-full space-y-4">
+                                <h3 className="font-bold text-lg">Editar Notas sobre {editingNpc.name}</h3>
+                                <p className="text-xs text-slate-400 mb-2">A IA usa essas notas para guiar as ações e falas deste personagem.</p>
+                                
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-slate-400">Aparência</label>
+                                    <textarea className="w-full bg-slate-900 p-2 rounded text-sm" rows="2" value={editingNpc.appearance || ''} onChange={(e)=>setEditingNpc({...editingNpc, appearance: e.target.value})}></textarea>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-slate-400">Personalidade</label>
+                                    <input className="w-full bg-slate-900 p-2 rounded text-sm" value={editingNpc.personality || ''} onChange={(e)=>setEditingNpc({...editingNpc, personality: e.target.value})} />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-slate-400">História Compartilhada / Segredos</label>
+                                    <textarea className="w-full bg-slate-900 p-2 rounded text-sm" rows="3" value={editingNpc.backstory || ''} onChange={(e)=>setEditingNpc({...editingNpc, backstory: e.target.value})}></textarea>
+                                </div>
+
+                                <div className="flex justify-end gap-2 pt-4">
+                                    <button onClick={()=>setEditingNpc(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-white">Cancelar</button>
+                                    <button onClick={()=>{ updateRel(editingNpc.idx, { appearance: editingNpc.appearance, personality: editingNpc.personality, backstory: editingNpc.backstory }); setEditingNpc(null); }} className="px-4 py-2 text-sm bg-blue-600 rounded hover:bg-blue-500">Salvar Mudanças</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const MusicTab = ({ audioTracks, setAudioTracks, currentMood }) => {
+            const categories = ['combate_padrao', 'combate_dificil', 'boss', 'ambiente_calmo', 'investigativo', 'opressivo', 'tensao'];
+            
+            const handleAudioUpload = (e, cat) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                // Usando URL de objeto para tocar o arquivo local sem estourar cota de armazenamento de dados imediatamente.
+                // Nota: URLs de objeto são perdidas no refresh. Para persistência real, precisaríamos salvar o binário no IndexedDB.
+                const url = URL.createObjectURL(file);
+                setAudioTracks(prev => ({...prev, [cat]: url}));
+            };
+
+            return (
+                <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar">
+                    <div className="max-w-3xl mx-auto space-y-6">
+                        <div className="bg-blue-900/30 border border-blue-800/50 p-4 rounded-xl text-sm text-blue-200">
+                            A Inteligência Artificial definirá o "Clima" (Mood) da cena atual e trocará a música automaticamente se houver uma trilha correspondente na categoria.
+                            <br/><br/><strong>Clima Atual:</strong> <span className="uppercase font-bold text-white bg-blue-600 px-2 py-1 rounded text-xs">{currentMood}</span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {categories.map(cat => (
+                                <div key={cat} className={`p-4 rounded-xl border ${currentMood === cat ? 'bg-slate-700 border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'bg-slate-800 border-slate-700'} flex items-center justify-between`}>
+                                    <div>
+                                        <h4 className="font-bold capitalize text-slate-200">{cat.replace('_', ' ')}</h4>
+                                        <p className="text-xs text-slate-500 mt-1">{audioTracks[cat] ? 'Música Carregada' : 'Nenhuma música'}</p>
+                                    </div>
+                                    <label className="cursor-pointer bg-slate-700 hover:bg-slate-600 p-2 rounded-full transition-colors text-slate-300">
+                                        <Icon name={audioTracks[cat] ? 'music-4' : 'upload'} size={18} />
+                                        <input type="file" hidden accept="audio/*" onChange={(e) => handleAudioUpload(e, cat)} />
+                                    </label>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const SystemTab = ({ player, exportSave, importSave }) => (
+            <div className="h-full overflow-y-auto p-4 md:p-8 custom-scrollbar">
+                <div className="max-w-3xl mx-auto space-y-8">
+                    
+                    <div className="bg-slate-800 border border-slate-700 rounded-xl p-6">
+                        <h3 className="text-xl font-bold border-b border-slate-700 pb-2 mb-4">Ficha do Personagem</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                            {Object.entries(player.attributes || {}).map(([attr, val]) => (
+                                <div key={attr} className="bg-slate-900 p-3 rounded text-center border border-slate-800">
+                                    <span className="block text-xs text-slate-500 uppercase font-bold">{attr}</span>
+                                    <span className="block text-2xl font-black text-blue-400">{val}</span>
+                                </div>
+                            ))}
+                        </div>
+                        <div>
+                            <h4 className="text-sm font-bold text-slate-400 mb-2">Habilidades</h4>
+                            <div className="flex flex-wrap gap-2">
+                                {(player.skills || []).map((sk, i) => (
+                                    <span key={i} className="bg-purple-900/40 border border-purple-800/50 text-purple-300 px-3 py-1 rounded-full text-sm">{sk}</span>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-slate-800 border border-slate-700 rounded-xl p-6">
+                        <h3 className="text-xl font-bold border-b border-slate-700 pb-2 mb-4">Dados do Jogo</h3>
+                        <p className="text-sm text-slate-400 mb-4">Seu jogo é salvo automaticamente localmente (IndexedDB) a cada turno para suportar imagens e prevenir perda de dados. Você também pode exportar um arquivo físico.</p>
+                        
+                        <div className="flex flex-col md:flex-row gap-4">
+                            <button onClick={exportSave} className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 rounded font-semibold flex items-center justify-center gap-2 transition-colors"><Icon name="download" size={18}/> Exportar Save (.json)</button>
+                            <label className="flex-1 py-3 bg-slate-700 hover:bg-slate-600 rounded font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors">
+                                <Icon name="upload" size={18}/> Importar Save
+                                <input type="file" hidden accept=".json" onChange={importSave} />
+                            </label>
+                        </div>
+                        <div className="mt-4 pt-4 border-t border-slate-700">
+                            <button onClick={() => { if(confirm("Certeza? Todo o progresso não salvo será perdido.")) window.location.reload(); }} className="w-full py-3 bg-red-900/50 hover:bg-red-800/50 text-red-400 rounded font-semibold border border-red-900 transition-colors">Sair para o Menu Principal</button>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        );
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
