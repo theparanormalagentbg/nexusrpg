@@ -24,6 +24,9 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
+        // O ambiente Canvas provê a autenticação automaticamente
+        const apiKey = ""; 
+
         // --- SISTEMA DE BANCO DE DADOS (IndexedDB para suportar imagens e áudio grandes) ---
         const DB_NAME = 'NexusRPGDB';
         const STORE_NAME = 'saveGames';
@@ -58,49 +61,61 @@
         };
 
         // --- INTEGRAÇÃO COM GEMINI API ---
-        const callGemini = async (apiKey, prompt, systemInstruction, isJson = true) => {
+        
+        // Helper para retentativas com backoff exponencial
+        const fetchWithBackoff = async (url, options) => {
+            const delays = [1000, 2000, 4000, 8000, 16000];
+            for (let i = 0; i <= delays.length; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                    return await response.json();
+                } catch (error) {
+                    if (i === delays.length) throw error;
+                    await new Promise(r => setTimeout(r, delays[i]));
+                }
+            }
+        };
+
+        const callGemini = async (prompt, systemInstruction, isJson = true) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+            
             const payload = {
-                contents: [{ parts: [{ text: prompt }] }],
-                systemInstruction: { parts: [{ text: systemInstruction }] },
+                contents: [{ parts: [{ text: prompt }] }]
             };
+            
+            if (systemInstruction) {
+                payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+            }
             
             if (isJson) {
                 payload.generationConfig = { responseMimeType: "application/json" };
             }
 
-            let retries = 3;
-            while (retries > 0) {
-                try {
-                    const response = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
-                    if (!response.ok) throw new Error(`API Error: ${response.status}`);
-                    const data = await response.json();
-                    const text = data.candidates[0].content.parts[0].text;
-                    return isJson ? JSON.parse(text) : text;
-                } catch (error) {
-                    retries--;
-                    if (retries === 0) throw error;
-                    await new Promise(r => setTimeout(r, 2000));
-                }
-            }
-        };
-
-        const callGeminiImage = async (apiKey, prompt) => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
-            const payload = { instances: { prompt: prompt }, parameters: { sampleCount: 1 } };
-            
             try {
-                const response = await fetch(url, {
+                const data = await fetchWithBackoff(url, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                if (!response.ok) throw new Error(`Image API Error: ${response.status}`);
-                const data = await response.json();
+                const text = data.candidates[0].content.parts[0].text;
+                return isJson ? JSON.parse(text) : text;
+            } catch (error) {
+                console.error("Falha na chamada de texto:", error);
+                throw error;
+            }
+        };
+
+        const callGeminiImage = async (prompt) => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${apiKey}`;
+            const payload = { instances: { prompt: prompt }, parameters: { sampleCount: 1 } };
+            
+            try {
+                const data = await fetchWithBackoff(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
                 return `data:image/png;base64,${data.predictions[0].bytesBase64Encoded}`;
             } catch (error) {
                 console.error("Erro ao gerar imagem:", error);
@@ -108,19 +123,23 @@
             }
         };
 
-        const callGeminiTTS = async (apiKey, text) => {
+        const callGeminiTTS = async (text) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
             const payload = {
                 contents: [{ parts: [{ text: text }] }],
                 generationConfig: {
                     responseModalities: ["AUDIO"],
                     speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Fenrir" } } }
-                }
+                },
+                model: "gemini-2.5-flash-preview-tts"
             };
             try {
-                const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                if (!response.ok) throw new Error(`TTS API Error: ${response.status}`);
-                const data = await response.json();
+                const data = await fetchWithBackoff(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload) 
+                });
+                
                 const base64 = data.candidates[0].content.parts[0].inlineData.data;
                 
                 // Conversão de PCM Base64 para WAV Blob para reprodução no navegador
@@ -179,7 +198,6 @@
         };
 
         const App = () => {
-            const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_api_key') || '');
             const [gameState, setGameState] = useState(null);
             const [currentTab, setCurrentTab] = useState('historia');
             const [loadingStr, setLoadingStr] = useState('');
@@ -246,8 +264,16 @@
                 reader.readAsText(file);
             };
 
+            const handleError = (e) => {
+                if (e.message && e.message.includes('401')) {
+                    alert("Erro de Autenticação (401): A sessão do Canvas pode ter expirado ou o acesso à IA foi negado. Por favor, recarregue a página e tente novamente.");
+                } else {
+                    alert("Erro de conexão com a API: " + e.message + ". Tente novamente.");
+                }
+                setLoadingStr('');
+            };
+
             const startGame = async () => {
-                if (!apiKey) return alert("Insira a chave da API do Gemini nas configurações.");
                 if (!setupData.charName) return alert("Dê um nome ao seu personagem.");
                 
                 setLoadingStr('Gerando aventura e atributos...');
@@ -267,7 +293,7 @@
                 }`;
 
                 try {
-                    const response = await callGemini(apiKey, "Inicie o jogo.", sysPrompt, true);
+                    const response = await callGemini("Inicie o jogo.", sysPrompt, true);
                     
                     const newGame = {
                         player: {
@@ -288,7 +314,7 @@
                     setGameState(newGame);
                     await saveGame(newGame);
                 } catch (e) {
-                    alert("Erro ao iniciar. Verifique sua API Key. Erro: " + e.message);
+                    handleError(e);
                 } finally {
                     setLoadingStr('');
                 }
@@ -326,7 +352,7 @@
                 const userPrompt = `O jogador escolheu [${actionType.toUpperCase()}]: "${text}"`;
 
                 try {
-                    const response = await callGemini(apiKey, userPrompt, sysPrompt, true);
+                    const response = await callGemini(userPrompt, sysPrompt, true);
                     
                     setGameState(prev => {
                         let newState = { ...prev };
@@ -379,8 +405,8 @@
                         return newState;
                     });
                 } catch (e) {
-                    alert("Erro ao processar turno. Tente novamente.");
                     setGameState(prev => ({ ...prev, story: prev.story.slice(0, -1) })); // revert user action
+                    handleError(e);
                 } finally {
                     setLoadingStr('');
                 }
@@ -395,9 +421,8 @@
             };
 
             const generateAvatar = async (prompt, callback) => {
-                if (!apiKey) return alert("API Key necessária.");
                 setLoadingStr("Gerando imagem...");
-                const imgBase64 = await callGeminiImage(apiKey, prompt);
+                const imgBase64 = await callGeminiImage(prompt);
                 if (imgBase64) callback(imgBase64);
                 else alert("Falha ao gerar imagem.");
                 setLoadingStr("");
@@ -414,11 +439,6 @@
                             <div className="space-y-4 pt-4">
                                 <button onClick={() => setSetupData({...setupData, startedSetup: true})} className="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition">Nova Campanha</button>
                                 <button onClick={loadGame} className="w-full py-3 bg-slate-700 hover:bg-slate-600 rounded-lg font-semibold transition">Carregar Jogo Salvo</button>
-                                
-                                <div className="pt-6 border-t border-slate-700 text-left">
-                                    <label className="block text-sm font-medium mb-1">Gemini API Key</label>
-                                    <input type="password" value={apiKey} onChange={(e) => { setApiKey(e.target.value); localStorage.setItem('gemini_api_key', e.target.value); }} className="w-full bg-slate-800 border border-slate-600 rounded p-2 focus:border-blue-500 outline-none" placeholder="AIzaSy..." />
-                                </div>
                             </div>
                         </div>
                     </div>
@@ -558,13 +578,12 @@
                     {/* MAIN CONTENT AREA */}
                     <main className="flex-1 overflow-hidden relative">
                         {currentTab === 'historia' && (
-                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} apiKey={apiKey} />
+                            <StoryTab story={gameState.story} onAction={processAction} isLoading={loadingStr} />
                         )}
                         {currentTab === 'inventario' && (
                             <InventoryTab 
                                 inventory={gameState.inventory} 
                                 attributes={p.attributes} 
-                                apiKey={apiKey}
                                 updateInventory={(newItems) => {
                                     const newState = {...gameState, inventory: {...gameState.inventory, items: newItems}};
                                     setGameState(newState);
@@ -581,7 +600,6 @@
                                     setGameState({...gameState, relationships: newRels});
                                     saveGame({...gameState, relationships: newRels});
                                 }}
-                                apiKey={apiKey}
                             />
                         )}
                         {currentTab === 'musica' && (
@@ -597,7 +615,7 @@
 
         // --- SUBCOMPONENTS ---
 
-        const StoryTab = ({ story, onAction, isLoading, apiKey }) => {
+        const StoryTab = ({ story, onAction, isLoading }) => {
             const endRef = useRef(null);
             const [inputText, setInputText] = useState('');
             const [actionType, setActionType] = useState('ação');
@@ -615,12 +633,11 @@
             };
 
             const handleGetHints = async () => {
-                if (!apiKey) return alert("API Key necessária para dicas.");
                 setIsFetchingHints(true);
                 const sysPrompt = `Analise a última narração e sugira 3 opções curtas de ação criativas para o jogador (máx 5 palavras cada). Retorne JSON: {"hints": ["opção 1", "opção 2", "opção 3"]}`;
                 const promptText = `Última narração: ${story[story.length - 1]?.text || 'Início da aventura'}`;
                 try {
-                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
+                    const res = await callGemini(promptText, sysPrompt, true);
                     if (res && res.hints) setHints(res.hints);
                 } catch (e) { console.error(e); }
                 setIsFetchingHints(false);
@@ -632,10 +649,9 @@
                     setPlayingAudio(null);
                     return;
                 }
-                if (!apiKey) return alert("API Key necessária para narração em áudio.");
                 setPlayingAudio('loading');
                 const cleanText = text.replace(/<[^>]*>?/gm, ''); // Remove tags HTML
-                const audioUrl = await callGeminiTTS(apiKey, cleanText);
+                const audioUrl = await callGeminiTTS(cleanText);
                 if (audioUrl) {
                     const audio = new Audio(audioUrl);
                     audio.onended = () => setPlayingAudio(null);
@@ -643,6 +659,7 @@
                     setPlayingAudio(audio);
                 } else {
                     setPlayingAudio(null);
+                    alert("Aviso: Falha ao gerar o áudio. A sessão do modelo TTS pode estar indisponível no momento.");
                 }
             };
 
@@ -717,19 +734,18 @@
             );
         };
 
-        const InventoryTab = ({ inventory, attributes, apiKey, updateInventory }) => {
+        const InventoryTab = ({ inventory, attributes, updateInventory }) => {
             const [selectedDoc, setSelectedDoc] = useState(null);
             const [isAnalyzing, setIsAnalyzing] = useState(false);
             const totalItems = inventory.items.length;
             const overload = totalItems > inventory.capacity;
 
             const handleAnalyzeItem = async () => {
-                if (!apiKey) return alert("API Key necessária para análise.");
                 setIsAnalyzing(true);
                 const sysPrompt = `Você é um sábio narrador. Crie um parágrafo fascinante de lore, lenda ou propriedade mágica secreta sobre este item. Retorne JSON: {"lore": "texto gerado aqui"}`;
                 const promptText = `Item: ${selectedDoc.name}. Descrição Base: ${selectedDoc.desc}`;
                 try {
-                    const res = await callGemini(apiKey, promptText, sysPrompt, true);
+                    const res = await callGemini(promptText, sysPrompt, true);
                     if (res && res.lore) {
                         const newItems = inventory.items.map(item => 
                             item.name === selectedDoc.name ? { ...item, lore: res.lore } : item
@@ -737,7 +753,10 @@
                         updateInventory(newItems);
                         setSelectedDoc({ ...selectedDoc, lore: res.lore });
                     }
-                } catch (e) { console.error(e); }
+                } catch (e) { 
+                    console.error(e);
+                    alert("Aviso: Falha ao inspecionar o item. Tente novamente em instantes.");
+                }
                 setIsAnalyzing(false);
             };
 
@@ -813,7 +832,7 @@
             );
         };
 
-        const RelationshipsTab = ({ rels, updateRel, apiKey }) => {
+        const RelationshipsTab = ({ rels, updateRel }) => {
             const [editingNpc, setEditingNpc] = useState(null);
 
             const handleImgUpload = (e, idx) => {
@@ -825,10 +844,9 @@
             };
 
             const genNpcImage = async (idx, npc) => {
-                if (!apiKey) return alert("API Key necessária.");
                 updateRel(idx, { isGeneratingImg: true });
                 const prompt = `Retrato de personagem de RPG: ${npc.name}. Aparelho: ${npc.appearance || 'aparência genérica'}. Estilo de arte conceitual de jogo, focado no rosto.`;
-                const img = await callGeminiImage(apiKey, prompt);
+                const img = await callGeminiImage(prompt);
                 updateRel(idx, { avatar: img, isGeneratingImg: false });
             };
 
